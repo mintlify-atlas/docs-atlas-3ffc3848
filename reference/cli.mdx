@@ -131,6 +131,15 @@ hyperterse start [path] [flags]
 
 <ParamField path="--watch" type="boolean" default="false">
   Watch `.terse/.ts` files and hot-reload on changes. Cannot be used with `--source`.
+  
+  **Behavior:**
+  - Monitors config files, adapter files, tool configs, and TypeScript scripts
+  - Debounces changes with 500ms delay
+  - Hot-reloads the model without restarting the HTTP server
+  - Reinitializes connectors and re-bundles scripts
+  - Existing connections remain active during reload
+  
+  **Implementation:** Uses `fsnotify` with `ReloadModel()` method (`core/runtime/server/server.go:196-242`)
 </ParamField>
 
 **Examples:**

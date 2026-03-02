@@ -152,11 +152,19 @@ Discover tools by natural language query.
 
 **Implementation:** `core/runtime/mcp/mcp.go:93-138`
 
-**Search Algorithm:** Uses hybrid scoring with:
-- Token coverage (exact/partial matching)
-- N-gram similarity (Jaccard index)
-- Field-weighted scoring (name: 30%, statement: 25%, input names: 18%)
-- Substring boosting for exact matches
+**Search Algorithm:** Uses hybrid scoring with field weighting:
+- **Name tokens:** 30% weight
+- **Statement tokens:** 25% weight
+- **Input name tokens:** 18% weight
+- **Description tokens:** 14% weight
+- **Input description tokens:** 8% weight
+- **N-gram similarity:** 5% weight (Jaccard index)
+- **Substring bonuses:**
+  - Exact match in name: +10%
+  - Exact match in statement: +8%
+  - Exact match in description: +3%
+
+Maximum raw score is capped at 1.0, then scaled to 1-100 for relevance score.
 
 **Source:** `core/runtime/mcp/search_index.go:123-150`
 
@@ -265,10 +273,10 @@ Errors are returned as MCP error responses with JSON-RPC error codes:
 
 ## Configuration
 
-Search result limit can be configured in `hyperterse.yml`:
+Search result limit can be configured in `.hyperterse`:
 
 ```yaml
-tool_defaults:
+tools:
   search:
     limit: 20  # Default: 10
 ```

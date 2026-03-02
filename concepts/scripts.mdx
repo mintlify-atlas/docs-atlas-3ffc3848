@@ -329,8 +329,31 @@ mappers:
 ```
 
 **Syntax:** `<path>#<export-name>`
-- `<path>` — Relative to tool directory or project root
+- `<path>` — Script file path (see resolution rules below)
 - `<export-name>` — Named export (defaults to `"default"` if omitted)
+
+### Path Resolution Rules
+
+Script paths are resolved in the following order (`core/framework/compiler.go:215-240`):
+
+1. **Relative paths** (`./script.ts`, `../shared/util.ts`) — Resolved relative to the tool directory
+2. **Absolute paths** (`/app/shared/script.ts`) — Used as-is from filesystem root
+3. **Other paths** (`script.ts`, `shared/util.ts`) — Searched in:
+   - Tool directory first
+   - Then project base directory
+
+**Examples:**
+
+```yaml app/tools/get-user/config.terse
+handler: "./handler.ts"           # Resolves to app/tools/get-user/handler.ts
+mappers:
+  input: "../shared/validate.ts"  # Resolves to app/tools/shared/validate.ts
+  output: "mapper.ts"              # Searches: app/tools/get-user/mapper.ts, then app/mapper.ts
+```
+
+<Warning>
+Absolute paths are discouraged in production as they reduce portability across deployment environments.
+</Warning>
 
 ### Auto-Discovery (Convention)
 

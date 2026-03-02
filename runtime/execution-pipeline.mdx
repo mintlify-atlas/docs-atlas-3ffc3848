@@ -426,16 +426,23 @@ IdleTimeout: 60s
 ```
 
 **Cache Policy:**
-```yaml
-tool_defaults:
+```yaml .hyperterse
+tools:
   cache:
     enabled: true
     ttl: 120  # seconds
+```
 
-tools:
-  - name: get_user
-    cache:
-      enabled: false  # Override default
+Per-tool override:
+```yaml app/tools/get-user/config.terse
+description: "Get user by ID"
+use: main-db
+statement: "SELECT * FROM users WHERE id = {{ inputs.user_id }}"
+cache:
+  enabled: false  # Override global default
+inputs:
+  user_id:
+    type: int
 ```
 
 **Connector Pools:**

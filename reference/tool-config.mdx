@@ -304,6 +304,37 @@ inputs:
   </Expandable>
 </ParamField>
 
+<ParamField path="cache" type="object">
+  Per-tool cache configuration. Overrides global `tools.cache` settings from root config.
+
+  <Expandable title="properties">
+    <ParamField path="enabled" type="boolean">
+      Enable caching for this tool. Overrides global cache setting.
+
+      ```yaml
+      cache:
+        enabled: false  # Disable caching for this tool
+      ```
+    </ParamField>
+
+    <ParamField path="ttl" type="integer">
+      Time-to-live in seconds for cached results. Overrides global TTL.
+
+      **Minimum:** 1 second
+
+      ```yaml
+      cache:
+        enabled: true
+        ttl: 300  # Cache for 5 minutes
+      ```
+    </ParamField>
+  </Expandable>
+
+  <Note>
+    See [Caching documentation](/runtime/caching) for details on cache key generation and behavior.
+  </Note>
+</ParamField>
+
 ## Tool Types
 
 Tools must be **either** database-backed **or** custom handler, not both:
