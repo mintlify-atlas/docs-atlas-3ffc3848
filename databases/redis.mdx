@@ -1,0 +1,456 @@
+---
+title: Redis Adapter
+description: Connect Hyperterse tools to Redis for caching and key-value operations
+---
+
+The Redis adapter enables Hyperterse tools to execute Redis commands for caching, session storage, rate limiting, and other key-value operations.
+
+## Connection String Format
+
+Redis adapters use the standard Redis URL format:
+
+```
+redis://[user:password@]host[:port][/database]
+```
+
+### Basic Connection
+
+```
+redis://localhost:6379
+```
+
+### With Database Selection
+
+```
+redis://localhost:6379/0
+```
+
+### With Authentication
+
+```
+redis://user:password@redis.example.com:6379/0
+```
+
+### Redis 6+ ACL Authentication
+
+```
+redis://myuser:mypassword@localhost:6379/0
+```
+
+## Adapter Configuration
+
+Create a `.terse` file in your `adapters/` directory:
+
+```yaml adapters/redis-cache.terse
+connector: redis
+connection_string: redis://localhost:6379/0
+```
+
+### Example from Demo
+
+```yaml adapters/my-other-adapter.terse
+connector: redis
+connection_string: "redis://localhost:6379/0"
+```
+
+## Connection String Options
+
+The Redis adapter uses the `redis.ParseURL` function to parse connection strings. All standard Redis URL options are supported:
+
+| Option | Description |
+|--------|-------------|
+| Database selection | Specified in path: `/0`, `/1`, etc. |
+| Password | Included in URL: `redis://:password@host:6379` |
+| Username | For ACL auth: `redis://user:pass@host:6379` |
+
+<Note>
+Redis does not support additional query parameters in the connection string. Configure advanced options through Redis configuration files or runtime settings.
+</Note>
+
+## Example Tool Using Redis
+
+```yaml tools/get-cache/config.terse
+description: "Get cached value by key"
+use: redis-cache
+statement: GET {{ inputs.key }}
+inputs:
+  key:
+    type: string
+    description: "Cache key to retrieve"
+auth:
+  plugin: allow_all
+```
+
+```yaml tools/set-cache/config.terse
+description: "Set cache value with expiration"
+use: redis-cache
+statement: SETEX {{ inputs.key }} {{ inputs.ttl }} {{ inputs.value }}
+inputs:
+  key:
+    type: string
+    description: "Cache key"
+  ttl:
+    type: int
+    description: "Time to live in seconds"
+  value:
+    type: string
+    description: "Value to cache"
+auth:
+  plugin: allow_all
+```
+
+## Command Execution
+
+Redis commands are executed as plain text statements:
+
+- Commands are parsed by splitting on whitespace (core/runtime/connectors/redis.go:61)
+- The first token is the command name (converted to uppercase)
+- Remaining tokens are arguments
+- Template variables like `{{ inputs.key }}` are substituted before execution
+
+### Command Examples
+
+<Tabs>
+  <Tab title="String Operations">
+    ```yaml
+    # GET
+    statement: GET {{ inputs.key }}
+    
+    # SET
+    statement: SET {{ inputs.key }} {{ inputs.value }}
+    
+    # SETEX (with TTL)
+    statement: SETEX {{ inputs.key }} 3600 {{ inputs.value }}
+    
+    # INCR
+    statement: INCR {{ inputs.counter }}
+    ```
+  </Tab>
+  
+  <Tab title="Hash Operations">
+    ```yaml
+    # HGET
+    statement: HGET {{ inputs.hash }} {{ inputs.field }}
+    
+    # HSET
+    statement: HSET {{ inputs.hash }} {{ inputs.field }} {{ inputs.value }}
+    
+    # HGETALL
+    statement: HGETALL {{ inputs.hash }}
+    
+    # HDEL
+    statement: HDEL {{ inputs.hash }} {{ inputs.field }}
+    ```
+  </Tab>
+  
+  <Tab title="List Operations">
+    ```yaml
+    # LPUSH
+    statement: LPUSH {{ inputs.list }} {{ inputs.value }}
+    
+    # RPOP
+    statement: RPOP {{ inputs.list }}
+    
+    # LRANGE
+    statement: LRANGE {{ inputs.list }} 0 -1
+    
+    # LLEN
+    statement: LLEN {{ inputs.list }}
+    ```
+  </Tab>
+  
+  <Tab title="Set Operations">
+    ```yaml
+    # SADD
+    statement: SADD {{ inputs.set }} {{ inputs.member }}
+    
+    # SMEMBERS
+    statement: SMEMBERS {{ inputs.set }}
+    
+    # SISMEMBER
+    statement: SISMEMBER {{ inputs.set }} {{ inputs.member }}
+    
+    # SCARD
+    statement: SCARD {{ inputs.set }}
+    ```
+  </Tab>
+  
+  <Tab title="Sorted Set Operations">
+    ```yaml
+    # ZADD
+    statement: ZADD {{ inputs.zset }} {{ inputs.score }} {{ inputs.member }}
+    
+    # ZRANGE
+    statement: ZRANGE {{ inputs.zset }} 0 -1 WITHSCORES
+    
+    # ZRANK
+    statement: ZRANK {{ inputs.zset }} {{ inputs.member }}
+    
+    # ZSCORE
+    statement: ZSCORE {{ inputs.zset }} {{ inputs.member }}
+    ```
+  </Tab>
+  
+  <Tab title="Key Operations">
+    ```yaml
+    # DEL
+    statement: DEL {{ inputs.key }}
+    
+    # EXISTS
+    statement: EXISTS {{ inputs.key }}
+    
+    # EXPIRE
+    statement: EXPIRE {{ inputs.key }} {{ inputs.seconds }}
+    
+    # TTL
+    statement: TTL {{ inputs.key }}
+    ```
+  </Tab>
+</Tabs>
+
+## Response Format
+
+Redis command results are returned as a single map in an array:
+
+```json
+[
+  {
+    "value": "result"
+  }
+]
+```
+
+The result structure depends on the return type (core/runtime/connectors/redis.go:104-119):
+
+- **String values**: `{ "value": "string" }`
+- **Arrays**: `{ "values": ["item1", "item2"] }`
+- **Maps**: `{ "value": { "key1": "value1", "key2": "value2" } }`
+- **Other types**: `{ "value": result }`
+
+## Connection Pooling
+
+The Redis adapter automatically manages connections:
+
+- **Connection Creation**: A Redis client is created when the adapter is initialized
+- **Connection Reuse**: The same client connection is reused across all tool executions
+- **Health Checks**: The adapter pings Redis on initialization to verify connectivity (core/runtime/connectors/redis.go:40)
+- **Automatic Cleanup**: The connection is properly closed during shutdown
+
+The `go-redis` client handles connection pooling internally.
+
+## Health Checks
+
+The Redis adapter performs health checks during initialization:
+
+```go
+// Health check on connection
+if err := client.Ping(context.Background()).Err(); err != nil {
+    return nil, fmt.Errorf("failed to ping redis: %w", err)
+}
+```
+
+This ensures Redis is reachable and credentials are valid before accepting requests.
+
+## SSL/TLS Configuration
+
+For Redis with TLS (Redis 6+), use the `rediss://` scheme:
+
+```yaml adapters/redis-secure.terse
+connector: redis
+connection_string: rediss://user:pass@redis.example.com:6380/0
+```
+
+<Note>
+The `rediss://` scheme (note the double 's') enables TLS connections to Redis.
+</Note>
+
+### Redis Sentinel with TLS
+
+For advanced TLS configurations with Redis Sentinel or custom certificates, you may need to configure the Redis client directly in your Go code.
+
+## Authentication
+
+<Tabs>
+  <Tab title="No Authentication">
+    ```yaml
+    connector: redis
+    connection_string: redis://localhost:6379/0
+    ```
+  </Tab>
+  
+  <Tab title="Password Only (Redis < 6)">
+    ```yaml
+    connector: redis
+    connection_string: redis://:mypassword@localhost:6379/0
+    ```
+  </Tab>
+  
+  <Tab title="ACL User (Redis 6+)">
+    ```yaml
+    connector: redis
+    connection_string: redis://myuser:mypassword@localhost:6379/0
+    ```
+  </Tab>
+  
+  <Tab title="Environment Variable">
+    ```yaml
+    connector: redis
+    connection_string: redis://${REDIS_USER}:${REDIS_PASS}@${REDIS_HOST}:6379/0
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+Never commit passwords directly in `.terse` files. Use environment variables or secret management systems.
+</Note>
+
+## Use Cases
+
+### Caching
+
+```yaml tools/cache-user/config.terse
+description: "Cache user data with 1 hour TTL"
+use: redis-cache
+statement: SETEX user:{{ inputs.userId }} 3600 {{ inputs.userData }}
+inputs:
+  userId:
+    type: string
+    description: "User ID"
+  userData:
+    type: string
+    description: "JSON user data"
+auth:
+  plugin: allow_all
+```
+
+### Rate Limiting
+
+```yaml tools/check-rate-limit/config.terse
+description: "Increment and check rate limit counter"
+use: redis-cache
+statement: INCR ratelimit:{{ inputs.userId }}:{{ inputs.window }}
+inputs:
+  userId:
+    type: string
+    description: "User ID"
+  window:
+    type: string
+    description: "Time window (e.g., 2024-03-02:14)"
+auth:
+  plugin: allow_all
+```
+
+### Session Storage
+
+```yaml tools/get-session/config.terse
+description: "Get session data by session ID"
+use: redis-cache
+statement: HGETALL session:{{ inputs.sessionId }}
+inputs:
+  sessionId:
+    type: string
+    description: "Session ID"
+auth:
+  plugin: allow_all
+```
+
+### Leaderboard
+
+```yaml tools/add-score/config.terse
+description: "Add user score to leaderboard"
+use: redis-cache
+statement: ZADD leaderboard {{ inputs.score }} {{ inputs.userId }}
+inputs:
+  userId:
+    type: string
+    description: "User ID"
+  score:
+    type: int
+    description: "User score"
+auth:
+  plugin: allow_all
+```
+
+## Example: Complete Adapter Setup
+
+```yaml adapters/session-store.terse
+connector: redis
+connection_string: rediss://session_user:secure_pass@redis.internal:6380/1
+```
+
+```yaml tools/store-session/config.terse
+description: "Store session data with expiration"
+use: session-store
+statement: SETEX session:{{ inputs.sessionId }} {{ inputs.ttl }} {{ inputs.sessionData }}
+inputs:
+  sessionId:
+    type: string
+    description: "Unique session ID"
+  ttl:
+    type: int
+    description: "Session TTL in seconds"
+  sessionData:
+    type: string
+    description: "JSON-encoded session data"
+auth:
+  plugin: allow_all
+```
+
+## Redis Cluster
+
+<Warning>
+The current Redis adapter uses `redis.NewClient()` which connects to a single Redis instance. For Redis Cluster support, you may need to extend the adapter to use `redis.NewClusterClient()`.
+</Warning>
+
+## Limitations
+
+- Commands are parsed by splitting on whitespace, so values with spaces may require special handling
+- Complex data structures must be serialized (e.g., JSON) before storing
+- No built-in support for Redis Cluster (single instance only)
+- No built-in support for Redis Sentinel
+
+## Troubleshooting
+
+### Connection Refused
+
+Ensure Redis is running and accessible:
+
+```bash
+redis-cli -h localhost -p 6379 ping
+```
+
+### Authentication Failed
+
+Verify password and ACL configuration:
+
+```bash
+redis-cli -h localhost -p 6379 -a yourpassword ping
+```
+
+### Wrong Database
+
+Ensure you're connecting to the correct database number (0-15):
+
+```yaml
+connection_string: redis://localhost:6379/0  # Database 0
+```
+
+### TLS Connection Failed
+
+Use `rediss://` (with double 's') for TLS connections:
+
+```yaml
+connection_string: rediss://localhost:6380/0
+```
+
+### Command Not Executing
+
+Check that your statement uses valid Redis command syntax:
+
+```yaml
+# Correct
+statement: GET mykey
+
+# Incorrect
+statement: GET
+```

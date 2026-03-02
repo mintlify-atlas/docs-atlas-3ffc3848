@@ -1,0 +1,72 @@
+---
+title: Installation
+description: Install Hyperterse and set up your development environment to start building MCP servers.
+---
+
+# Installation
+
+Get started with Hyperterse by installing the CLI tool.
+
+## Install Hyperterse
+
+Run the installation script to install Hyperterse globally:
+
+```bash
+curl -fsSL https://hyperterse.com/install | bash
+```
+
+This will download the latest Hyperterse binary and add it to your PATH.
+
+<Note>
+The install script supports macOS and Linux. For Windows, use WSL2 or check the GitHub releases for Windows binaries.
+</Note>
+
+## System requirements
+
+Hyperterse requires:
+
+- **Operating system**: macOS, Linux, or Windows (WSL2)
+- **Node.js**: v18 or higher (for TypeScript script handlers)
+- **Database** (optional): Postgres, MySQL, MongoDB, or Redis if using database adapters
+
+<Tip>
+You don't need a database to get started. Hyperterse supports pure script-backed tools that work without any database connection.
+</Tip>
+
+## Verify installation
+
+Confirm that Hyperterse is installed correctly:
+
+```bash
+hyperterse --version
+```
+
+You should see the version number printed to the console.
+
+## Available commands
+
+Hyperterse provides the following CLI commands:
+
+- `hyperterse init` - Scaffold a starter project
+- `hyperterse start` - Run the runtime from config (development)
+- `hyperterse build` - Produce a deployable artifact
+- `hyperterse serve` - Run from a compiled artifact (production)
+- `hyperterse validate` - Validate config and tool scripts
+- `hyperterse upgrade` - Upgrade the installed binary
+- `hyperterse completion` - Shell completion helper
+
+## Update Hyperterse
+
+To upgrade to the latest version:
+
+```bash
+hyperterse upgrade
+```
+
+This will download and install the newest release.
+
+## Next steps
+
+<Card title="Quickstart" icon="rocket" href="/quickstart">
+  Build your first MCP server with Hyperterse
+</Card>

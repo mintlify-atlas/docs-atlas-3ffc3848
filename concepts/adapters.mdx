@@ -1,0 +1,337 @@
+---
+title: Database Adapters
+description: Connect to PostgreSQL, MySQL, MongoDB, Redis, and more using Hyperterse's unified adapter system
+---
+
+Adapters provide unified database connectivity for your tools. Each adapter represents a connection to a specific database, which tools can reference by name using the `use` field.
+
+## Supported Connectors
+
+Hyperterse includes built-in connectors for popular databases:
+
+<CardGroup cols={2}>
+  <Card title="PostgreSQL" icon="elephant">
+    Full SQL support with parameterized queries
+  </Card>
+  <Card title="MySQL" icon="database">
+    MySQL and MariaDB compatibility
+  </Card>
+  <Card title="MongoDB" icon="leaf">
+    JSON-based command execution via `runCommand`
+  </Card>
+  <Card title="Redis" icon="cube">
+    Key-value operations and pub/sub
+  </Card>
+</CardGroup>
+
+## Adapter Definition
+
+Adapters are defined in `.terse` files within the `adapters/` directory:
+
+```yaml adapters/my-adapter.terse
+connector: postgres
+connection_string: postgresql://demo:demo@localhost:5432/demo
+options:
+  sslmode: disable
+```
+
+### Schema Reference
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | No | Adapter identifier (defaults to filename) |
+| `connector` | enum | Yes | Database type: `postgres`, `mysql`, `mongodb`, `redis` |
+| `connection_string` | string | Yes | Database connection URI |
+| `options` | map | No | Connector-specific connection options |
+
+## Connection Strings
+
+Each connector accepts standard connection string formats:
+
+<Tabs>
+  <Tab title="PostgreSQL">
+    ```yaml
+    connector: postgres
+    connection_string: postgresql://user:password@localhost:5432/dbname
+    options:
+      sslmode: require
+      connect_timeout: "10"
+    ```
+
+    **URL format**: `postgresql://[user[:password]@][host][:port][/dbname][?param1=value1&...]`
+
+    **Key-value format**: `host=localhost port=5432 user=postgres password=secret dbname=mydb`
+
+    Common options: `sslmode`, `connect_timeout`, `application_name`
+  </Tab>
+  
+  <Tab title="MySQL">
+    ```yaml
+    connector: mysql
+    connection_string: mysql://user:password@tcp(localhost:3306)/dbname
+    options:
+      charset: utf8mb4
+      parseTime: "true"
+    ```
+
+    **Format**: `[username[:password]@][protocol[(address)]]/dbname[?param1=value1&...]`
+
+    Common options: `charset`, `parseTime`, `loc`, `timeout`
+  </Tab>
+  
+  <Tab title="MongoDB">
+    ```yaml
+    connector: mongodb
+    connection_string: mongodb://localhost:27017/mydb
+    options:
+      authSource: admin
+      retryWrites: "true"
+    ```
+
+    **Format**: `mongodb://[username:password@]host[:port][/database][?options]`
+
+    **Atlas**: `mongodb+srv://username:password@cluster.mongodb.net/mydb`
+
+    Common options: `authSource`, `retryWrites`, `w`, `readPreference`
+  </Tab>
+  
+  <Tab title="Redis">
+    ```yaml
+    connector: redis
+    connection_string: redis://localhost:6379/0
+    options:
+      password: "secret"
+      db: "1"
+    ```
+
+    **Format**: `redis://[:password@]host[:port][/database]`
+
+    **TLS**: `rediss://user:password@localhost:6380/0`
+
+    Common options: `password`, `db`, `dial_timeout`
+  </Tab>
+</Tabs>
+
+## Environment Variables
+
+Connection strings support environment variable substitution using `${VAR_NAME}` syntax:
+
+```yaml adapters/production.terse
+connector: postgres
+connection_string: postgresql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}
+options:
+  sslmode: ${DB_SSL_MODE}
+```
+
+<Warning>
+**Runtime substitution**: Environment variables are resolved when the server starts (see `core/runtime/connectors/connector.go:35`), not at build time.
+</Warning>
+
+Example environment setup:
+
+```bash .env
+DB_USER=postgres
+DB_PASSWORD=secure_password
+DB_HOST=prod-db.example.com
+DB_PORT=5432
+DB_NAME=app_production
+DB_SSL_MODE=require
+```
+
+## Connector Implementation
+
+All connectors implement the unified `Connector` interface (`core/runtime/connectors/connector.go:15-25`):
+
+```go
+type Connector interface {
+    // Execute executes a statement against the database with context support
+    Execute(ctx context.Context, statement string, params map[string]any) ([]map[string]any, error)
+    
+    // Close closes the connector and releases resources
+    Close() error
+}
+```
+
+### Execution Flow
+
+When a tool executes, the connector:
+
+1. **Receives context** from the HTTP request (for timeout/cancellation propagation)
+2. **Executes the statement** with provided parameters
+3. **Returns results** as a slice of maps (column name → value)
+4. **Records observability metrics** (duration, success/failure)
+
+### PostgreSQL Example
+
+From `core/runtime/connectors/postgres.go:91-161`:
+
+```go
+func (p *PostgresConnector) Execute(ctx context.Context, statement string, params map[string]any) ([]map[string]any, error) {
+    rows, err := p.db.QueryContext(ctx, statement)
+    if err != nil {
+        return nil, fmt.Errorf("failed to execute query: %w", err)
+    }
+    defer rows.Close()
+
+    // Get column names
+    columns, err := rows.Columns()
+    
+    // Build result slice
+    var results []map[string]any
+    for rows.Next() {
+        rowMap := make(map[string]any)
+        // Scan row into map...
+        results = append(results, rowMap)
+    }
+    
+    return results, nil
+}
+```
+
+## MongoDB Special Case
+
+MongoDB uses JSON-based commands instead of SQL statements. Tools must provide JSON commands that are executed via `runCommand`:
+
+```yaml tools/find-orders/config.terse
+use: mongodb-adapter
+statement: |
+  {
+    "database": "mydb",
+    "command": {
+      "find": "orders",
+      "filter": { "status": "pending" },
+      "limit": 10
+    }
+  }
+```
+
+<Note>
+The `json_statements` config flag is automatically set to `true` for MongoDB connectors (`core/runtime/connectors/connector.go:62`).
+</Note>
+
+### MongoDB Command Examples
+
+<CodeGroup>
+```json Find Documents
+{
+  "database": "mydb",
+  "command": {
+    "find": "orders",
+    "filter": { "id": "123" },
+    "limit": 1,
+    "singleBatch": true
+  }
+}
+```
+
+```json Insert Document
+{
+  "database": "mydb",
+  "command": {
+    "insert": "orders",
+    "documents": [
+      { "id": "456", "total": 100, "status": "pending" }
+    ]
+  }
+}
+```
+
+```json Aggregate Pipeline
+{
+  "database": "mydb",
+  "command": {
+    "aggregate": "orders",
+    "pipeline": [
+      { "$match": { "total": { "$gt": 50 } } },
+      { "$group": { "_id": "$status", "count": { "$sum": 1 } } }
+    ],
+    "cursor": {}
+  }
+}
+```
+</CodeGroup>
+
+## Connection Pooling
+
+Connectors use connection pools optimized for each database:
+
+- **PostgreSQL/MySQL**: Uses Go's `database/sql` connection pool
+- **MongoDB**: Uses the official driver's built-in connection pool
+- **Redis**: Connection pool with configurable size
+
+Pools are initialized when the server starts and closed during graceful shutdown (`core/runtime/connectors/manager.go`).
+
+## Multiple Adapters
+
+You can define multiple adapters for different databases or environments:
+
+```yaml adapters/users-db.terse
+connector: postgres
+connection_string: postgresql://localhost:5432/users
+```
+
+```yaml adapters/cache.terse
+connector: redis
+connection_string: redis://localhost:6379/0
+```
+
+```yaml adapters/analytics.terse
+connector: mongodb
+connection_string: mongodb://localhost:27017/analytics
+```
+
+Tools reference adapters by name:
+
+```yaml tools/get-user/config.terse
+use: users-db
+statement: SELECT * FROM users WHERE id = {{ inputs.userId }}
+```
+
+## Observability
+
+All connector operations are automatically instrumented with:
+
+- **OpenTelemetry traces** (operation spans with connector type attribute)
+- **Prometheus metrics** (operation duration, success/failure counters)
+- **Structured logging** (connection lifecycle events)
+
+Example trace attributes (`core/runtime/connectors/postgres.go:98`):
+
+```go
+span.SetAttributes(
+    attribute.String(observability.AttrConnectorType, "postgres"),
+)
+```
+
+## Error Handling
+
+Connectors return descriptive errors for common failure scenarios:
+
+- **Connection failures**: DNS resolution, network timeouts, authentication errors
+- **Query errors**: Syntax errors, constraint violations, permission issues
+- **Data errors**: Type conversion failures, column mismatches
+
+Example from `core/runtime/connectors/postgres.go:75-85`:
+
+```go
+db, err := sql.Open("postgres", connectionString)
+if err != nil {
+    return nil, fmt.Errorf("failed to open postgres connection: %w", err)
+}
+
+if err := db.Ping(); err != nil {
+    db.Close()
+    return nil, fmt.Errorf("failed to ping postgres database: %w", err)
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Tools" icon="wrench" href="/concepts/tools">
+    Use adapters in your tool definitions
+  </Card>
+  <Card title="Project Structure" icon="folder-tree" href="/concepts/project-structure">
+    Organize adapters in your project
+  </Card>
+</CardGroup>

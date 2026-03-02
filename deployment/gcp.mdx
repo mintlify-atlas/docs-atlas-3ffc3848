@@ -1,0 +1,341 @@
+---
+title: Google Cloud Platform Deployment
+description: Deploy Hyperterse to GCP using Cloud Run or GKE
+---
+
+Deploy Hyperterse to Google Cloud Platform using fully managed Cloud Run or Kubernetes Engine.
+
+## Cloud Run Deployment (Recommended)
+
+Cloud Run is the easiest way to deploy containerized applications on GCP.
+
+### Prerequisites
+
+- Google Cloud account with billing enabled
+- `gcloud` CLI installed and configured
+- Docker image built
+
+### Deploy to Cloud Run
+
+<Steps>
+  <Step title="Build and push to Artifact Registry">
+    ```bash
+    # Create repository
+    gcloud artifacts repositories create hyperterse \
+      --repository-format=docker \
+      --location=us-central1
+    
+    # Configure Docker
+    gcloud auth configure-docker us-central1-docker.pkg.dev
+    
+    # Build and push
+    docker build -t us-central1-docker.pkg.dev/PROJECT_ID/hyperterse/server:latest .
+    docker push us-central1-docker.pkg.dev/PROJECT_ID/hyperterse/server:latest
+    ```
+  </Step>
+  
+  <Step title="Deploy to Cloud Run">
+    ```bash
+    gcloud run deploy hyperterse \
+      --image us-central1-docker.pkg.dev/PROJECT_ID/hyperterse/server:latest \
+      --platform managed \
+      --region us-central1 \
+      --allow-unauthenticated \
+      --port 8080 \
+      --cpu 1 \
+      --memory 512Mi \
+      --min-instances 1 \
+      --max-instances 10 \
+      --timeout 60 \
+      --set-env-vars PORT=8080
+    ```
+  </Step>
+  
+  <Step title="Set environment variables">
+    ```bash
+    gcloud run services update hyperterse \
+      --region us-central1 \
+      --update-env-vars DATABASE_URL="postgres://user:pass@/mydb?host=/cloudsql/PROJECT_ID:REGION:INSTANCE"
+    ```
+  </Step>
+  
+  <Step title="Test deployment">
+    ```bash
+    SERVICE_URL=$(gcloud run services describe hyperterse --region us-central1 --format 'value(status.url)')
+    curl $SERVICE_URL/heartbeat
+    ```
+  </Step>
+</Steps>
+
+## Cloud Run with Cloud SQL
+
+Connect Cloud Run to Cloud SQL for managed PostgreSQL:
+
+```bash
+# Create Cloud SQL instance
+gcloud sql instances create hyperterse-db \
+  --database-version=POSTGRES_15 \
+  --tier=db-f1-micro \
+  --region=us-central1
+
+# Create database
+gcloud sql databases create hyperterse --instance=hyperterse-db
+
+# Create user
+gcloud sql users create dbuser \
+  --instance=hyperterse-db \
+  --password=secure-password
+
+# Deploy Cloud Run with Cloud SQL connection
+gcloud run deploy hyperterse \
+  --image us-central1-docker.pkg.dev/PROJECT_ID/hyperterse/server:latest \
+  --region us-central1 \
+  --add-cloudsql-instances PROJECT_ID:us-central1:hyperterse-db \
+  --set-env-vars DATABASE_URL="postgres://dbuser:secure-password@/hyperterse?host=/cloudsql/PROJECT_ID:us-central1:hyperterse-db"
+```
+
+## Secret Manager Integration
+
+Store sensitive configuration in Secret Manager:
+
+<Steps>
+  <Step title="Create secret">
+    ```bash
+    echo -n "postgres://user:pass@host:5432/db" | \
+      gcloud secrets create database-url --data-file=-
+    ```
+  </Step>
+  
+  <Step title="Grant Cloud Run access">
+    ```bash
+    gcloud secrets add-iam-policy-binding database-url \
+      --member="serviceAccount:PROJECT_NUMBER-compute@developer.gserviceaccount.com" \
+      --role="roles/secretmanager.secretAccessor"
+    ```
+  </Step>
+  
+  <Step title="Deploy with secrets">
+    ```bash
+    gcloud run deploy hyperterse \
+      --image us-central1-docker.pkg.dev/PROJECT_ID/hyperterse/server:latest \
+      --region us-central1 \
+      --update-secrets DATABASE_URL=database-url:latest
+    ```
+  </Step>
+</Steps>
+
+## Cloud Run YAML Configuration
+
+Create `service.yaml` for declarative deployment:
+
+```yaml
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: hyperterse
+  annotations:
+    run.googleapis.com/ingress: all
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: '1'
+        autoscaling.knative.dev/maxScale: '10'
+        run.googleapis.com/cloudsql-instances: PROJECT_ID:us-central1:hyperterse-db
+    spec:
+      containerConcurrency: 80
+      timeoutSeconds: 60
+      containers:
+      - image: us-central1-docker.pkg.dev/PROJECT_ID/hyperterse/server:latest
+        ports:
+        - containerPort: 8080
+        env:
+        - name: PORT
+          value: '8080'
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: database-url
+              key: latest
+        resources:
+          limits:
+            cpu: '1'
+            memory: 512Mi
+        startupProbe:
+          httpGet:
+            path: /heartbeat
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /heartbeat
+            port: 8080
+          periodSeconds: 30
+          timeoutSeconds: 3
+```
+
+Deploy:
+
+```bash
+gcloud run services replace service.yaml --region us-central1
+```
+
+## GKE Deployment Alternative
+
+For Kubernetes-based deployment with more control:
+
+<Steps>
+  <Step title="Create GKE cluster">
+    ```bash
+    gcloud container clusters create hyperterse-cluster \
+      --region us-central1 \
+      --num-nodes 3 \
+      --machine-type n1-standard-2 \
+      --enable-autoscaling \
+      --min-nodes 3 \
+      --max-nodes 10
+    ```
+  </Step>
+  
+  <Step title="Get credentials">
+    ```bash
+    gcloud container clusters get-credentials hyperterse-cluster --region us-central1
+    ```
+  </Step>
+  
+  <Step title="Deploy using Kubernetes manifests">
+    Follow the [Kubernetes deployment guide](/deployment/kubernetes) with GKE-specific configurations.
+  </Step>
+</Steps>
+
+## Custom Domain with Cloud Run
+
+<Steps>
+  <Step title="Map custom domain">
+    ```bash
+    gcloud run domain-mappings create \
+      --service hyperterse \
+      --domain api.yourdomain.com \
+      --region us-central1
+    ```
+  </Step>
+  
+  <Step title="Configure DNS">
+    Add the DNS records shown in the output to your domain provider.
+  </Step>
+</Steps>
+
+## Monitoring and Logging
+
+### View Logs
+
+```bash
+gcloud logging read "resource.type=cloud_run_revision AND resource.labels.service_name=hyperterse" \
+  --limit 50 \
+  --format json
+```
+
+### Create Uptime Check
+
+```bash
+gcloud monitoring uptime create hyperterse-health \
+  --resource-type=uptime-url \
+  --display-name="Hyperterse Health Check" \
+  --http-check-path=/heartbeat \
+  --period=60 \
+  --timeout=10s
+```
+
+### Create Alert Policy
+
+```bash
+gcloud alpha monitoring policies create \
+  --notification-channels=CHANNEL_ID \
+  --display-name="Hyperterse High Error Rate" \
+  --condition-display-name="Error rate > 5%" \
+  --condition-threshold-value=0.05 \
+  --condition-threshold-duration=300s
+```
+
+## CI/CD with Cloud Build
+
+Create `cloudbuild.yaml`:
+
+```yaml
+steps:
+  # Build Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/hyperterse/server:$COMMIT_SHA'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/hyperterse/server:latest'
+      - '.'
+
+  # Push image to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - '--all-tags'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/hyperterse/server'
+
+  # Deploy to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'hyperterse'
+      - '--image'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/hyperterse/server:$COMMIT_SHA'
+      - '--region'
+      - 'us-central1'
+      - '--platform'
+      - 'managed'
+
+images:
+  - 'us-central1-docker.pkg.dev/$PROJECT_ID/hyperterse/server:$COMMIT_SHA'
+  - 'us-central1-docker.pkg.dev/$PROJECT_ID/hyperterse/server:latest'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+```
+
+Trigger builds:
+
+```bash
+gcloud builds submit --config cloudbuild.yaml
+```
+
+## Cost Optimization
+
+<AccordionGroup>
+  <Accordion title="Cloud Run Pricing">
+    Cloud Run charges for:
+    - CPU and memory during request processing
+    - Number of requests
+    - Egress traffic
+    
+    Set `--min-instances 0` for development to avoid idle charges.
+  </Accordion>
+  
+  <Accordion title="Reduce Cold Starts">
+    For production, keep at least 1 instance warm:
+    
+    ```bash
+    gcloud run services update hyperterse \
+      --min-instances 1 \
+      --region us-central1
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+- Set up [Cloud SQL for PostgreSQL](https://cloud.google.com/sql/docs/postgres)
+- Configure [Cloud Armor](https://cloud.google.com/armor) for DDoS protection
+- Enable [Cloud Trace](/runtime/observability) for distributed tracing
+- Set up [Cloud Monitoring](/runtime/observability)

@@ -1,0 +1,357 @@
+---
+title: AWS Deployment
+description: Deploy Hyperterse to AWS using ECS Fargate or EC2
+---
+
+Deploy Hyperterse to AWS using managed container services or EC2 instances.
+
+## ECS Fargate Deployment
+
+Fargate is recommended for most deployments as it's fully managed and serverless.
+
+### Prerequisites
+
+- AWS account with appropriate IAM permissions
+- AWS CLI configured
+- Docker image pushed to Amazon ECR
+
+### Push Image to ECR
+
+<Steps>
+  <Step title="Create ECR repository">
+    ```bash
+    aws ecr create-repository --repository-name hyperterse
+    ```
+  </Step>
+  
+  <Step title="Build and tag image">
+    ```bash
+    docker build -t hyperterse .
+    docker tag hyperterse:latest <account-id>.dkr.ecr.<region>.amazonaws.com/hyperterse:latest
+    ```
+  </Step>
+  
+  <Step title="Authenticate and push">
+    ```bash
+    aws ecr get-login-password --region <region> | docker login --username AWS --password-stdin <account-id>.dkr.ecr.<region>.amazonaws.com
+    docker push <account-id>.dkr.ecr.<region>.amazonaws.com/hyperterse:latest
+    ```
+  </Step>
+</Steps>
+
+### ECS Task Definition
+
+Create `task-definition.json`:
+
+```json
+{
+  "family": "hyperterse",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "arn:aws:iam::<account-id>:role/ecsTaskExecutionRole",
+  "containerDefinitions": [
+    {
+      "name": "hyperterse",
+      "image": "<account-id>.dkr.ecr.<region>.amazonaws.com/hyperterse:latest",
+      "portMappings": [
+        {
+          "containerPort": 8080,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        {
+          "name": "PORT",
+          "value": "8080"
+        }
+      ],
+      "secrets": [
+        {
+          "name": "DATABASE_URL",
+          "valueFrom": "arn:aws:secretsmanager:<region>:<account-id>:secret:hyperterse/database-url"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/hyperterse",
+          "awslogs-region": "<region>",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "healthCheck": {
+        "command": ["CMD-SHELL", "curl -f http://localhost:8080/heartbeat || exit 1"],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 10
+      }
+    }
+  ]
+}
+```
+
+### Register Task Definition
+
+```bash
+aws ecs register-task-definition --cli-input-json file://task-definition.json
+```
+
+### Create ECS Cluster
+
+```bash
+aws ecs create-cluster --cluster-name hyperterse-cluster
+```
+
+### Create ECS Service with ALB
+
+<Steps>
+  <Step title="Create Application Load Balancer">
+    ```bash
+    aws elbv2 create-load-balancer \
+      --name hyperterse-alb \
+      --subnets subnet-xxxxx subnet-yyyyy \
+      --security-groups sg-xxxxx
+    ```
+  </Step>
+  
+  <Step title="Create target group">
+    ```bash
+    aws elbv2 create-target-group \
+      --name hyperterse-tg \
+      --protocol HTTP \
+      --port 8080 \
+      --vpc-id vpc-xxxxx \
+      --target-type ip \
+      --health-check-path /heartbeat \
+      --health-check-interval-seconds 30 \
+      --healthy-threshold-count 2 \
+      --unhealthy-threshold-count 3
+    ```
+  </Step>
+  
+  <Step title="Create listener">
+    ```bash
+    aws elbv2 create-listener \
+      --load-balancer-arn <alb-arn> \
+      --protocol HTTP \
+      --port 80 \
+      --default-actions Type=forward,TargetGroupArn=<target-group-arn>
+    ```
+  </Step>
+  
+  <Step title="Create ECS service">
+    ```bash
+    aws ecs create-service \
+      --cluster hyperterse-cluster \
+      --service-name hyperterse-service \
+      --task-definition hyperterse \
+      --desired-count 2 \
+      --launch-type FARGATE \
+      --network-configuration "awsvpcConfiguration={subnets=[subnet-xxxxx,subnet-yyyyy],securityGroups=[sg-xxxxx],assignPublicIp=ENABLED}" \
+      --load-balancers targetGroupArn=<target-group-arn>,containerName=hyperterse,containerPort=8080
+    ```
+  </Step>
+</Steps>
+
+## AWS Secrets Manager
+
+Store sensitive configuration in Secrets Manager:
+
+```bash
+aws secretsmanager create-secret \
+  --name hyperterse/database-url \
+  --secret-string "postgres://user:pass@rds-endpoint:5432/mydb"
+```
+
+Grant ECS task execution role access:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:GetSecretValue"
+      ],
+      "Resource": [
+        "arn:aws:secretsmanager:<region>:<account-id>:secret:hyperterse/*"
+      ]
+    }
+  ]
+}
+```
+
+## Auto Scaling
+
+Enable auto scaling for the ECS service:
+
+```bash
+aws application-autoscaling register-scalable-target \
+  --service-namespace ecs \
+  --scalable-dimension ecs:service:DesiredCount \
+  --resource-id service/hyperterse-cluster/hyperterse-service \
+  --min-capacity 2 \
+  --max-capacity 10
+
+aws application-autoscaling put-scaling-policy \
+  --service-namespace ecs \
+  --scalable-dimension ecs:service:DesiredCount \
+  --resource-id service/hyperterse-cluster/hyperterse-service \
+  --policy-name cpu-scaling \
+  --policy-type TargetTrackingScaling \
+  --target-tracking-scaling-policy-configuration file://scaling-policy.json
+```
+
+`scaling-policy.json`:
+
+```json
+{
+  "TargetValue": 70.0,
+  "PredefinedMetricSpecification": {
+    "PredefinedMetricType": "ECSServiceAverageCPUUtilization"
+  },
+  "ScaleInCooldown": 300,
+  "ScaleOutCooldown": 60
+}
+```
+
+## EC2 Deployment Alternative
+
+For more control, deploy to EC2 instances:
+
+<Steps>
+  <Step title="Launch EC2 instance">
+    ```bash
+    aws ec2 run-instances \
+      --image-id ami-xxxxx \
+      --instance-type t3.medium \
+      --key-name your-key \
+      --security-group-ids sg-xxxxx \
+      --subnet-id subnet-xxxxx \
+      --user-data file://user-data.sh
+    ```
+  </Step>
+  
+  <Step title="User data script">
+    Create `user-data.sh`:
+    
+    ```bash
+    #!/bin/bash
+    set -e
+    
+    # Install dependencies
+    yum update -y
+    yum install -y docker
+    systemctl start docker
+    systemctl enable docker
+    
+    # Pull and run container
+    $(aws ecr get-login-password --region <region> | docker login --username AWS --password-stdin <account-id>.dkr.ecr.<region>.amazonaws.com)
+    docker pull <account-id>.dkr.ecr.<region>.amazonaws.com/hyperterse:latest
+    docker run -d \
+      --name hyperterse \
+      --restart unless-stopped \
+      -p 8080:8080 \
+      -e DATABASE_URL="$(aws secretsmanager get-secret-value --secret-id hyperterse/database-url --query SecretString --output text)" \
+      <account-id>.dkr.ecr.<region>.amazonaws.com/hyperterse:latest
+    ```
+  </Step>
+</Steps>
+
+## CloudFormation Template
+
+For infrastructure as code, use CloudFormation:
+
+```yaml
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Hyperterse ECS Fargate deployment
+
+Resources:
+  HyperterseCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: hyperterse-cluster
+
+  HyperterseTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: hyperterse
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: 512
+      Memory: 1024
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: hyperterse
+          Image: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/hyperterse:latest
+          PortMappings:
+            - ContainerPort: 8080
+          Environment:
+            - Name: PORT
+              Value: 8080
+          Secrets:
+            - Name: DATABASE_URL
+              ValueFrom: !Ref DatabaseSecret
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - curl -f http://localhost:8080/heartbeat || exit 1
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+
+  HyperterseService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: hyperterse-service
+      Cluster: !Ref HyperterseCluster
+      TaskDefinition: !Ref HyperterseTaskDefinition
+      DesiredCount: 2
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets:
+            - !Ref PrivateSubnet1
+            - !Ref PrivateSubnet2
+          SecurityGroups:
+            - !Ref ServiceSecurityGroup
+      LoadBalancers:
+        - TargetGroupArn: !Ref TargetGroup
+          ContainerName: hyperterse
+          ContainerPort: 8080
+```
+
+## Monitoring with CloudWatch
+
+View logs:
+
+```bash
+aws logs tail /ecs/hyperterse --follow
+```
+
+Create CloudWatch alarms for monitoring:
+
+```bash
+aws cloudwatch put-metric-alarm \
+  --alarm-name hyperterse-high-cpu \
+  --alarm-description "Alert when CPU exceeds 80%" \
+  --metric-name CPUUtilization \
+  --namespace AWS/ECS \
+  --statistic Average \
+  --period 300 \
+  --threshold 80 \
+  --comparison-operator GreaterThanThreshold \
+  --evaluation-periods 2
+```
+
+## Next Steps
+
+- Set up [RDS for PostgreSQL](https://aws.amazon.com/rds/postgresql/) as your database
+- Configure [Route 53](https://aws.amazon.com/route53/) for DNS
+- Enable [AWS WAF](https://aws.amazon.com/waf/) for security
+- Set up [CloudWatch monitoring](/runtime/observability)

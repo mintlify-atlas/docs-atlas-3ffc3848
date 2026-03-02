@@ -1,0 +1,471 @@
+---
+title: MongoDB Adapter
+description: Connect Hyperterse tools to MongoDB databases
+---
+
+The MongoDB adapter enables Hyperterse tools to execute database commands against MongoDB using JSON-based statements. Unlike SQL adapters, MongoDB requires `json_statements: true` and uses MongoDB's command API.
+
+## Connection String Format
+
+MongoDB adapters use the standard MongoDB connection string URI format:
+
+```
+mongodb://[username:password@]host[:port][/[defaultauthdb][?options]]
+mongodb+srv://[username:password@]host[/[defaultauthdb][?options]]
+```
+
+### Standard Connection
+
+```
+mongodb://localhost:27017
+```
+
+### With Authentication
+
+```
+mongodb://myuser:mypass@localhost:27017/admin
+```
+
+### MongoDB Atlas (SRV)
+
+```
+mongodb+srv://user:pass@cluster.mongodb.net/mydb
+```
+
+## Adapter Configuration
+
+Create a `.terse` file in your `adapters/` directory:
+
+```yaml adapters/mongodb.terse
+connector: mongodb
+connection_string: mongodb://localhost:27017/mydb
+```
+
+<Warning>
+MongoDB adapters **require** tools to use `json_statements: true` in the runtime configuration. The adapter will return an error if this is not set (core/runtime/connectors/mongodb.go:34).
+</Warning>
+
+## Available Options
+
+Options are appended to the connection string as query parameters:
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `authSource` | string | Database name for authentication (default: `admin`) |
+| `replicaSet` | string | Name of the replica set |
+| `ssl` | boolean | Enable SSL/TLS connection |
+| `retryWrites` | boolean | Enable retryable writes (default: `true`) |
+| `retryReads` | boolean | Enable retryable reads (default: `true`) |
+| `w` | number/string | Write concern: `0`, `1`, `majority` |
+| `readPreference` | string | Read preference: `primary`, `secondary`, `primaryPreferred` |
+| `maxPoolSize` | number | Maximum connection pool size |
+| `minPoolSize` | number | Minimum connection pool size |
+| `connectTimeoutMS` | number | Connection timeout in milliseconds |
+| `serverSelectionTimeoutMS` | number | Server selection timeout (default: 30000) |
+
+See the [MongoDB connection string documentation](https://www.mongodb.com/docs/manual/reference/connection-string/) for all available options.
+
+### Example with Options
+
+```yaml adapters/mongodb-atlas.terse
+connector: mongodb
+connection_string: mongodb+srv://user:pass@cluster.mongodb.net/production
+options:
+  retryWrites: true
+  w: majority
+  maxPoolSize: 50
+```
+
+## JSON Statement Format
+
+MongoDB tools execute commands using JSON statements with two required fields:
+
+```json
+{
+  "database": "database_name",
+  "command": { /* MongoDB command */ }
+}
+```
+
+### Command Structure
+
+The `command` field must be a valid MongoDB command object where the first key is the command name (e.g., `find`, `insert`, `update`, `delete`, `aggregate`).
+
+## Example Tool Using MongoDB
+
+```yaml tools/find-orders/config.terse
+description: "Find orders by customer ID"
+use: mongodb
+statement: |
+  {
+    "database": "ecommerce",
+    "command": {
+      "find": "orders",
+      "filter": { "customerId": {{ inputs.customerId }} },
+      "sort": { "createdAt": -1 },
+      "limit": 10
+    }
+  }
+inputs:
+  customerId:
+    type: string
+    description: "Customer ID to search for"
+auth:
+  plugin: allow_all
+```
+
+## Supported MongoDB Commands
+
+The adapter uses MongoDB's `RunCommand` API and supports all database commands:
+
+### Find Documents
+
+```json
+{
+  "database": "mydb",
+  "command": {
+    "find": "orders",
+    "filter": { "status": "pending" },
+    "limit": 100
+  }
+}
+```
+
+### Find One Document
+
+```json
+{
+  "database": "mydb",
+  "command": {
+    "find": "orders",
+    "filter": { "id": "123" },
+    "limit": 1,
+    "singleBatch": true
+  }
+}
+```
+
+### Insert Documents
+
+```json
+{
+  "database": "mydb",
+  "command": {
+    "insert": "orders",
+    "documents": [
+      {
+        "id": "456",
+        "customerId": "customer-1",
+        "total": 99.99,
+        "status": "pending"
+      }
+    ]
+  }
+}
+```
+
+### Update Documents
+
+```json
+{
+  "database": "mydb",
+  "command": {
+    "update": "orders",
+    "updates": [
+      {
+        "q": { "id": "123" },
+        "u": { "$set": { "status": "completed" } }
+      }
+    ]
+  }
+}
+```
+
+### Delete Documents
+
+```json
+{
+  "database": "mydb",
+  "command": {
+    "delete": "orders",
+    "deletes": [
+      {
+        "q": { "id": "123" },
+        "limit": 1
+      }
+    ]
+  }
+}
+```
+
+### Aggregate Pipeline
+
+```json
+{
+  "database": "mydb",
+  "command": {
+    "aggregate": "orders",
+    "pipeline": [
+      { "$match": { "status": "completed" } },
+      { "$group": { "_id": "$customerId", "total": { "$sum": "$amount" } } },
+      { "$sort": { "total": -1 } }
+    ],
+    "cursor": {}
+  }
+}
+```
+
+### Count Documents
+
+```json
+{
+  "database": "mydb",
+  "command": {
+    "count": "orders",
+    "query": { "status": "pending" }
+  }
+}
+```
+
+## Connection Pooling
+
+The MongoDB adapter automatically manages connection pooling:
+
+- **Pool Creation**: A connection pool is established when the adapter is initialized
+- **Connection Reuse**: Connections are reused across multiple tool executions
+- **Health Checks**: The adapter pings the database with a 10-second timeout on initialization (core/runtime/connectors/mongodb.go:63-69)
+- **Automatic Cleanup**: Connections are properly closed with a 5-second timeout during shutdown
+
+Configure pool size via connection string options:
+
+```yaml
+options:
+  maxPoolSize: 100
+  minPoolSize: 10
+```
+
+## Health Checks
+
+The MongoDB adapter performs health checks during initialization:
+
+```go
+// Health check with 10-second timeout
+ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+if err := client.Ping(ctx, readpref.Primary()); err != nil {
+    return nil, fmt.Errorf("failed to ping mongodb: %w", err)
+}
+```
+
+This ensures the database is reachable and credentials are valid before accepting requests.
+
+## SSL/TLS Configuration
+
+<Note>
+For MongoDB Atlas and production deployments, TLS is typically enabled by default.
+</Note>
+
+### Enable TLS
+
+```yaml adapters/mongodb-secure.terse
+connector: mongodb
+connection_string: mongodb://user:pass@mongo.example.com:27017/mydb
+options:
+  ssl: true
+  authSource: admin
+```
+
+### MongoDB Atlas
+
+Atlas connections automatically use TLS:
+
+```yaml adapters/mongodb-atlas.terse
+connector: mongodb
+connection_string: mongodb+srv://user:pass@cluster.mongodb.net/production
+options:
+  retryWrites: true
+  w: majority
+```
+
+## Authentication
+
+<Tabs>
+  <Tab title="SCRAM Authentication">
+    ```yaml
+    connector: mongodb
+    connection_string: mongodb://myuser:mypassword@localhost:27017/mydb?authSource=admin
+    ```
+  </Tab>
+  
+  <Tab title="No Authentication">
+    ```yaml
+    connector: mongodb
+    connection_string: mongodb://localhost:27017/mydb
+    ```
+  </Tab>
+  
+  <Tab title="Environment Variable">
+    ```yaml
+    connector: mongodb
+    connection_string: mongodb://${MONGO_USER}:${MONGO_PASS}@${MONGO_HOST}:27017/mydb
+    ```
+  </Tab>
+  
+  <Tab title="MongoDB Atlas">
+    ```yaml
+    connector: mongodb
+    connection_string: mongodb+srv://${ATLAS_USER}:${ATLAS_PASS}@cluster.mongodb.net/mydb
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+Never commit passwords directly in `.terse` files. Use environment variables or secret management systems.
+</Note>
+
+## Query Results
+
+The adapter returns results differently based on the command type:
+
+### Cursor Results (find, aggregate)
+
+For commands that return a cursor, the adapter extracts documents from `firstBatch`:
+
+```json
+[
+  { "_id": "507f1f77bcf86cd799439011", "name": "Product 1" },
+  { "_id": "507f1f77bcf86cd799439012", "name": "Product 2" }
+]
+```
+
+### Command Results (insert, update, delete, count)
+
+For commands that return a result document, the adapter returns it as a single-element array:
+
+```json
+[
+  { "n": 1, "ok": 1 }
+]
+```
+
+### ObjectId Handling
+
+MongoDB ObjectIds are automatically converted to hex strings:
+
+```json
+{
+  "_id": "507f1f77bcf86cd799439011"
+}
+```
+
+## Example: Complete Adapter Setup
+
+```yaml adapters/orders-db.terse
+connector: mongodb
+connection_string: mongodb+srv://orders_user:secure_pass@cluster.mongodb.net/orders
+options:
+  retryWrites: true
+  retryReads: true
+  w: majority
+  readPreference: primaryPreferred
+  maxPoolSize: 50
+  connectTimeoutMS: 10000
+  serverSelectionTimeoutMS: 30000
+```
+
+```yaml tools/aggregate-sales/config.terse
+description: "Aggregate sales by product category"
+use: orders-db
+statement: |
+  {
+    "database": "orders",
+    "command": {
+      "aggregate": "sales",
+      "pipeline": [
+        {
+          "$match": {
+            "date": {
+              "$gte": {{ inputs.startDate }},
+              "$lte": {{ inputs.endDate }}
+            }
+          }
+        },
+        {
+          "$group": {
+            "_id": "$category",
+            "totalRevenue": { "$sum": "$amount" },
+            "orderCount": { "$sum": 1 }
+          }
+        },
+        {
+          "$sort": { "totalRevenue": -1 }
+        }
+      ],
+      "cursor": {}
+    }
+  }
+inputs:
+  startDate:
+    type: string
+    description: "Start date (ISO 8601)"
+  endDate:
+    type: string
+    description: "End date (ISO 8601)"
+auth:
+  plugin: allow_all
+```
+
+## Replica Sets and High Availability
+
+```yaml adapters/mongodb-replica.terse
+connector: mongodb
+connection_string: mongodb://mongo1:27017,mongo2:27017,mongo3:27017/mydb
+options:
+  replicaSet: rs0
+  readPreference: primaryPreferred
+  w: majority
+  retryWrites: true
+```
+
+## Troubleshooting
+
+### Connection Timeout
+
+Increase timeout values:
+
+```yaml
+options:
+  connectTimeoutMS: 30000
+  serverSelectionTimeoutMS: 60000
+```
+
+### Authentication Failed
+
+Ensure `authSource` is correctly set:
+
+```yaml
+connection_string: mongodb://user:pass@localhost:27017/mydb?authSource=admin
+```
+
+### json_statements Error
+
+If you see "json_statements must be true for mongodb", ensure your tool is configured correctly. The MongoDB adapter requires JSON-formatted statements.
+
+### Atlas Connection Issues
+
+For MongoDB Atlas:
+
+1. Ensure your IP is whitelisted in Atlas Network Access
+2. Use `mongodb+srv://` connection string format
+3. Verify database user credentials
+
+### Invalid Command Error
+
+Ensure the command name is the first key in the command object:
+
+```json
+// Correct
+{ "find": "orders", "filter": {} }
+
+// Incorrect
+{ "filter": {}, "find": "orders" }
+```

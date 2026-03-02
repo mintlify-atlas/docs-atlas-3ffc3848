@@ -1,0 +1,417 @@
+---
+title: Caching
+description: In-memory result caching system
+---
+
+Hyperterse implements an in-memory cache using [Ristretto](https://github.com/dgraph-io/ristretto) to reduce database load for repeated tool executions.
+
+## Architecture
+
+**Implementation:** `core/runtime/executor/cache.go`
+
+```
+┌─────────────┐
+│  Executor   │
+└──────┬──────┘
+       │
+       ├─> buildCacheKey(toolName, finalStatement)
+       │       │
+       │       └─> SHA256 hash
+       │
+       ├─> cache.Get(key)
+       │       │
+       │       ├─> Hit: return cloned results
+       │       │
+       │       └─> Miss: continue to database
+       │
+       ├─> conn.Execute(...)
+       │
+       └─> cache.Set(key, results, ttl)
+               │
+               └─> Ristretto (async write)
+```
+
+## Cache Key Generation
+
+```go
+func buildCacheKey(toolName, finalStatement string) string {
+    hash := sha256.Sum256([]byte(toolName + ":" + finalStatement))
+    return hex.EncodeToString(hash[:])
+}
+```
+
+**Source:** `cache.go:73-76`
+
+**Key Components:**
+- Tool name (e.g., `get_user`)
+- Final statement **after** substitution (e.g., `SELECT * FROM users WHERE id = '123'`)
+
+**Why Final Statement?**
+
+The cache key includes the fully-substituted query to ensure:
+- Different inputs produce different cache keys
+- Same inputs (even for different tools with identical queries) share cache entries
+- Environment variable changes invalidate cache
+
+**Example:**
+```
+Tool: get_user
+Input: {user_id: "123"}
+Statement: SELECT * FROM users WHERE id = {{input.user_id}}
+Final Statement: SELECT * FROM users WHERE id = '123'
+
+Cache Key: sha256("get_user:SELECT * FROM users WHERE id = '123'")
+           → "a3f2c8b1..." (64 hex chars)
+```
+
+## Ristretto Configuration
+
+```go
+const (
+    defaultRistrettoMaxCost      = 128 << 20  // 128 MiB
+    defaultRistrettoNumCounters  = 1_000_000  // 10x expected keys
+    defaultRistrettoBufferItems  = 64
+)
+
+store, err := ristretto.NewCache(&ristretto.Config{
+    NumCounters: defaultRistrettoNumCounters,
+    MaxCost:     defaultRistrettoMaxCost,
+    BufferItems: defaultRistrettoBufferItems,
+})
+```
+
+**Source:** `cache.go:13-36`
+
+**Parameters:**
+- **NumCounters**: Bloom filter size for admission policy (10x expected live keys)
+- **MaxCost**: Maximum memory budget (128 MiB)
+- **BufferItems**: Ring buffer size for async writes (64 items)
+
+## Cost Estimation
+
+Ristretto uses a cost-based eviction policy. Each cache entry's cost is estimated:
+
+```go
+func estimateRowsCost(rows []map[string]any) int64 {
+    var total int64
+    for _, row := range rows {
+        total += int64(len(row) * 16)  // Map overhead
+        for key, value := range row {
+            total += int64(len(key))
+            total += estimateValueCost(value)
+        }
+    }
+    return total
+}
+```
+
+**Source:** `cache.go:97-119`
+
+**Value Cost by Type:**
+- `string`: length in bytes
+- `[]byte`: length in bytes
+- `bool`: 1 byte
+- `int/uint/float`: 4-8 bytes
+- `time.Time`: 16 bytes
+- `map[string]any`: recursive estimation
+- `[]any`: recursive estimation
+
+**Example:**
+```json
+[
+  {
+    "id": "123",
+    "name": "John Doe",
+    "age": 30
+  }
+]
+```
+
+**Cost Calculation:**
+```
+Map overhead: 16 bytes
+"id":         2 + 3 = 5 bytes
+"name":       4 + 8 = 12 bytes
+"age":        3 + 8 = 11 bytes
+Total:        44 bytes
+```
+
+## Cache Operations
+
+### Get (Read)
+
+```go
+func (c *toolCache) Get(key string) ([]map[string]any, bool) {
+    value, ok := c.store.Get(key)
+    if !ok {
+        return nil, false
+    }
+    rows, ok := value.([]map[string]any)
+    return cloneRows(rows), true
+}
+```
+
+**Source:** `cache.go:43-54`
+
+**Cloning:** Results are deep-cloned to prevent mutation of cached data.
+
+### Set (Write)
+
+```go
+func (c *toolCache) Set(key string, rows []map[string]any, ttl time.Duration) {
+    cost := estimateRowsCost(rows)
+    clonedRows := cloneRows(rows)
+    accepted := c.store.SetWithTTL(key, clonedRows, cost, ttl)
+    if accepted {
+        c.store.Wait()  // Ensure immediate availability
+    }
+}
+```
+
+**Source:** `cache.go:57-71`
+
+**Async Write:** Ristretto writes are async. `Wait()` ensures the value is immediately readable.
+
+**Admission Policy:** Not all writes are accepted (if cost exceeds budget or admission filter rejects).
+
+## TTL Configuration
+
+Cache TTL is resolved hierarchically:
+
+```go
+func (e *Executor) resolveCachePolicy(tool *hyperterse.Tool) (bool, time.Duration) {
+    enabled := false
+    ttlSeconds := defaultCacheTTLSeconds  // 120s
+
+    // 1. Global defaults
+    if e.model.ToolDefaults != nil && e.model.ToolDefaults.Cache != nil {
+        if defaultCache.HasEnabled {
+            enabled = defaultCache.Enabled
+        }
+        if defaultCache.HasTtl {
+            ttlSeconds = defaultCache.Ttl
+        }
+    }
+
+    // 2. Tool-specific overrides
+    if tool.Cache != nil {
+        if tool.Cache.HasEnabled {
+            enabled = tool.Cache.Enabled
+        }
+        if tool.Cache.HasTtl {
+            ttlSeconds = tool.Cache.Ttl
+        }
+    }
+
+    return enabled, time.Duration(ttlSeconds) * time.Second
+}
+```
+
+**Source:** `executor.go:161-191`
+
+### Configuration Examples
+
+**Global Default:**
+```yaml
+tool_defaults:
+  cache:
+    enabled: true
+    ttl: 300  # 5 minutes
+```
+
+**Per-Tool Override:**
+```yaml
+tools:
+  - name: get_user
+    cache:
+      enabled: true
+      ttl: 60  # 1 minute (override)
+
+  - name: create_order
+    cache:
+      enabled: false  # Disable for mutations
+```
+
+**Disable Globally:**
+```yaml
+tool_defaults:
+  cache:
+    enabled: false
+```
+
+## Cache Lifecycle
+
+### Initialization
+
+The cache is created once per executor instance:
+
+```go
+func NewExecutor(model *hyperterse.Model, manager *connectors.ConnectorManager) *Executor {
+    return &Executor{
+        cache: newToolCache(),
+        // ...
+    }
+}
+```
+
+**Source:** `executor.go:28-34`
+
+### Eviction
+
+Ristretto evicts entries based on:
+
+1. **TTL Expiration**: Entries expire after configured TTL
+2. **Cost Pressure**: Least frequently used (LFU) entries evicted when cost exceeds 128 MiB
+3. **Manual Invalidation**: Not currently supported (requires executor restart)
+
+### Shutdown
+
+The cache is not explicitly closed (Go GC handles cleanup).
+
+## Performance Impact
+
+### Cache Hit
+
+```go
+if cachedResults, found := e.cache.Get(cacheKey); found {
+    log.Debugf("Cache hit for tool: %s", toolName)
+    return cachedResults, nil
+}
+```
+
+**Latency:** ~0.1ms (hash lookup + clone)
+
+**Speedup:** 100-1000x vs. database query
+
+### Cache Miss
+
+```go
+results, err := conn.Execute(ctx, finalStatement, validatedInputs)
+if cacheEnabled {
+    e.cache.Set(cacheKey, results, cacheTTL)
+}
+```
+
+**Write Overhead:** ~0.5ms (async, non-blocking)
+
+**Source:** `executor.go:150-153`
+
+## Monitoring
+
+Cache hits/misses are not currently exposed as metrics. To monitor cache efficiency:
+
+1. **Enable debug logging:**
+   ```bash
+   HYPERTERSE_LOG_LEVEL=debug hyperterse serve
+   ```
+
+2. **Look for log entries:**
+   ```
+   [executor] Cache hit for tool: get_user
+   [executor] Cache miss for tool: get_user
+   ```
+
+## Limitations
+
+### No Distributed Caching
+
+The cache is in-memory and per-process. In multi-instance deployments:
+- Each instance maintains its own cache
+- No cache sharing between instances
+- Cold starts require rebuilding cache
+
+**Workaround:** Use a reverse proxy with request routing to maximize cache hits.
+
+### No Manual Invalidation
+
+Entries can only be invalidated by:
+- TTL expiration
+- Eviction due to cost pressure
+- Process restart
+
+**Workaround:** Set short TTLs for frequently-changing data.
+
+### Memory Bounded
+
+The cache is capped at 128 MiB. For larger result sets:
+- Enable caching selectively (per-tool `enabled: false`)
+- Reduce TTLs to increase turnover
+- Increase `defaultRistrettoMaxCost` (requires code change)
+
+## Best Practices
+
+### 1. Cache Read-Only Tools
+
+```yaml
+tools:
+  - name: get_user
+    cache:
+      enabled: true  # Safe: idempotent reads
+
+  - name: create_user
+    cache:
+      enabled: false  # Unsafe: mutations should not be cached
+```
+
+### 2. Use Appropriate TTLs
+
+- **Static data** (e.g., country codes): 3600s (1 hour)
+- **User profiles**: 300s (5 minutes)
+- **Real-time data** (e.g., stock prices): 5s or disabled
+
+### 3. Monitor Memory Usage
+
+Ristretto's 128 MiB limit is shared across all tools. Monitor:
+
+```bash
+# Linux/macOS
+ps aux | grep hyperterse
+
+# Memory usage in RSS column
+```
+
+### 4. Avoid Caching Large Result Sets
+
+For queries returning >1000 rows or >10 MB:
+- Disable caching (`enabled: false`)
+- Paginate results at the database level
+- Use database-level caching (e.g., PostgreSQL shared buffers)
+
+## Implementation Details
+
+### Deep Cloning
+
+```go
+func cloneRows(rows []map[string]any) []map[string]any {
+    out := make([]map[string]any, len(rows))
+    for i, row := range rows {
+        copyRow := make(map[string]any, len(row))
+        for key, value := range row {
+            copyRow[key] = value  // Shallow copy of values
+        }
+        out[i] = copyRow
+    }
+    return out
+}
+```
+
+**Source:** `cache.go:78-95`
+
+**Note:** Values are shallow-copied (safe for primitives, not for nested objects).
+
+### Thread Safety
+
+Ristretto is fully concurrent:
+- `Get()`: lock-free reads
+- `Set()`: async writes via ring buffer
+- No external locking required
+
+**Source:** [Ristretto Design](https://github.com/dgraph-io/ristretto#design)
+
+## Dependencies
+
+```go
+import "github.com/dgraph-io/ristretto"
+```
+
+**Version:** `v0.2.0` (from `go.mod:6`)

@@ -1,0 +1,438 @@
+---
+title: Azure Deployment
+description: Deploy Hyperterse to Azure using Container Instances or AKS
+---
+
+Deploy Hyperterse to Microsoft Azure using Container Instances for simple deployments or Azure Kubernetes Service for production workloads.
+
+## Azure Container Instances (Recommended for Simple Deployments)
+
+Azure Container Instances provides the fastest way to run containers without managing infrastructure.
+
+### Prerequisites
+
+- Azure account with active subscription
+- Azure CLI installed and configured
+- Docker image built
+
+### Push Image to Azure Container Registry
+
+<Steps>
+  <Step title="Create Container Registry">
+    ```bash
+    az acr create \
+      --resource-group myResourceGroup \
+      --name hyperterseregistry \
+      --sku Basic
+    ```
+  </Step>
+  
+  <Step title="Login to ACR">
+    ```bash
+    az acr login --name hyperterseregistry
+    ```
+  </Step>
+  
+  <Step title="Build and push image">
+    ```bash
+    # Tag image
+    docker tag hyperterse:latest hyperterseregistry.azurecr.io/hyperterse:latest
+    
+    # Push image
+    docker push hyperterseregistry.azurecr.io/hyperterse:latest
+    ```
+  </Step>
+</Steps>
+
+### Deploy to Container Instances
+
+```bash
+az container create \
+  --resource-group myResourceGroup \
+  --name hyperterse \
+  --image hyperterseregistry.azurecr.io/hyperterse:latest \
+  --registry-username hyperterseregistry \
+  --registry-password $(az acr credential show --name hyperterseregistry --query "passwords[0].value" -o tsv) \
+  --dns-name-label hyperterse-app \
+  --ports 8080 \
+  --cpu 1 \
+  --memory 1 \
+  --environment-variables PORT=8080 \
+  --secure-environment-variables DATABASE_URL="postgres://user:pass@host:5432/db"
+```
+
+### Test Deployment
+
+```bash
+# Get FQDN
+FQDN=$(az container show --resource-group myResourceGroup --name hyperterse --query "ipAddress.fqdn" -o tsv)
+
+# Test health endpoint
+curl http://$FQDN:8080/heartbeat
+```
+
+## Azure Container Instances with YAML
+
+Create `container-instance.yaml`:
+
+```yaml
+apiVersion: 2021-09-01
+location: eastus
+name: hyperterse
+properties:
+  containers:
+  - name: hyperterse
+    properties:
+      image: hyperterseregistry.azurecr.io/hyperterse:latest
+      ports:
+      - port: 8080
+        protocol: TCP
+      resources:
+        requests:
+          cpu: 1.0
+          memoryInGB: 1.0
+      environmentVariables:
+      - name: PORT
+        value: '8080'
+      - name: DATABASE_URL
+        secureValue: 'postgres://user:pass@host:5432/db'
+      livenessProbe:
+        httpGet:
+          path: /heartbeat
+          port: 8080
+        initialDelaySeconds: 10
+        periodSeconds: 30
+        failureThreshold: 3
+        successThreshold: 1
+        timeoutSeconds: 3
+  osType: Linux
+  restartPolicy: Always
+  ipAddress:
+    type: Public
+    ports:
+    - protocol: tcp
+      port: 8080
+    dnsNameLabel: hyperterse-app
+  imageRegistryCredentials:
+  - server: hyperterseregistry.azurecr.io
+    username: hyperterseregistry
+    password: <password>
+tags:
+  app: hyperterse
+  environment: production
+type: Microsoft.ContainerInstance/containerGroups
+```
+
+Deploy:
+
+```bash
+az container create --resource-group myResourceGroup --file container-instance.yaml
+```
+
+## Azure Key Vault Integration
+
+Store secrets in Azure Key Vault:
+
+<Steps>
+  <Step title="Create Key Vault">
+    ```bash
+    az keyvault create \
+      --name hyperterseVault \
+      --resource-group myResourceGroup \
+      --location eastus
+    ```
+  </Step>
+  
+  <Step title="Store secret">
+    ```bash
+    az keyvault secret set \
+      --vault-name hyperterseVault \
+      --name database-url \
+      --value "postgres://user:pass@host:5432/db"
+    ```
+  </Step>
+  
+  <Step title="Grant Container Instances access">
+    ```bash
+    # Create managed identity
+    az identity create \
+      --resource-group myResourceGroup \
+      --name hyperterse-identity
+    
+    # Grant access to Key Vault
+    IDENTITY_ID=$(az identity show --resource-group myResourceGroup --name hyperterse-identity --query principalId -o tsv)
+    
+    az keyvault set-policy \
+      --name hyperterseVault \
+      --object-id $IDENTITY_ID \
+      --secret-permissions get
+    ```
+  </Step>
+</Steps>
+
+## Azure Kubernetes Service (AKS) Deployment
+
+For production workloads requiring orchestration:
+
+<Steps>
+  <Step title="Create AKS cluster">
+    ```bash
+    az aks create \
+      --resource-group myResourceGroup \
+      --name hyperterse-cluster \
+      --node-count 3 \
+      --node-vm-size Standard_DS2_v2 \
+      --enable-addons monitoring \
+      --generate-ssh-keys \
+      --attach-acr hyperterseregistry
+    ```
+  </Step>
+  
+  <Step title="Get credentials">
+    ```bash
+    az aks get-credentials --resource-group myResourceGroup --name hyperterse-cluster
+    ```
+  </Step>
+  
+  <Step title="Deploy using Kubernetes manifests">
+    Follow the [Kubernetes deployment guide](/deployment/kubernetes) with AKS-specific configurations.
+  </Step>
+</Steps>
+
+## Azure Database for PostgreSQL Integration
+
+Use managed PostgreSQL database:
+
+```bash
+# Create PostgreSQL server
+az postgres flexible-server create \
+  --resource-group myResourceGroup \
+  --name hyperterse-db \
+  --location eastus \
+  --admin-user dbadmin \
+  --admin-password SecurePassword123! \
+  --sku-name Standard_B1ms \
+  --tier Burstable \
+  --public-access 0.0.0.0 \
+  --storage-size 32 \
+  --version 15
+
+# Create database
+az postgres flexible-server db create \
+  --resource-group myResourceGroup \
+  --server-name hyperterse-db \
+  --database-name hyperterse
+
+# Get connection string
+CONNECTION_STRING="postgres://dbadmin:SecurePassword123!@hyperterse-db.postgres.database.azure.com:5432/hyperterse?sslmode=require"
+```
+
+## Application Gateway for HTTPS
+
+Set up Application Gateway for SSL termination:
+
+```bash
+az network application-gateway create \
+  --name hyperterse-gateway \
+  --resource-group myResourceGroup \
+  --location eastus \
+  --capacity 2 \
+  --sku Standard_v2 \
+  --public-ip-address gateway-ip \
+  --vnet-name myVNet \
+  --subnet gateway-subnet \
+  --servers $FQDN:8080 \
+  --priority 100
+```
+
+## ARM Template Deployment
+
+Create `template.json` for Infrastructure as Code:
+
+```json
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "containerName": {
+      "type": "string",
+      "defaultValue": "hyperterse"
+    },
+    "imageName": {
+      "type": "string",
+      "defaultValue": "hyperterseregistry.azurecr.io/hyperterse:latest"
+    },
+    "databaseUrl": {
+      "type": "securestring"
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.ContainerInstance/containerGroups",
+      "apiVersion": "2021-09-01",
+      "name": "[parameters('containerName')]",
+      "location": "[resourceGroup().location]",
+      "properties": {
+        "containers": [
+          {
+            "name": "[parameters('containerName')]",
+            "properties": {
+              "image": "[parameters('imageName')]",
+              "ports": [
+                {
+                  "port": 8080,
+                  "protocol": "TCP"
+                }
+              ],
+              "resources": {
+                "requests": {
+                  "cpu": 1,
+                  "memoryInGB": 1
+                }
+              },
+              "environmentVariables": [
+                {
+                  "name": "PORT",
+                  "value": "8080"
+                },
+                {
+                  "name": "DATABASE_URL",
+                  "secureValue": "[parameters('databaseUrl')]"
+                }
+              ]
+            }
+          }
+        ],
+        "osType": "Linux",
+        "restartPolicy": "Always",
+        "ipAddress": {
+          "type": "Public",
+          "ports": [
+            {
+              "protocol": "TCP",
+              "port": 8080
+            }
+          ],
+          "dnsNameLabel": "[parameters('containerName')]"
+        }
+      }
+    }
+  ]
+}
+```
+
+Deploy:
+
+```bash
+az deployment group create \
+  --resource-group myResourceGroup \
+  --template-file template.json \
+  --parameters databaseUrl="postgres://user:pass@host:5432/db"
+```
+
+## Monitoring and Logging
+
+### View Container Logs
+
+```bash
+az container logs --resource-group myResourceGroup --name hyperterse --follow
+```
+
+### Azure Monitor Integration
+
+```bash
+az monitor log-analytics workspace create \
+  --resource-group myResourceGroup \
+  --workspace-name hyperterse-logs
+
+# Get workspace ID and key
+WORKSPACE_ID=$(az monitor log-analytics workspace show --resource-group myResourceGroup --workspace-name hyperterse-logs --query customerId -o tsv)
+WORKSPACE_KEY=$(az monitor log-analytics workspace get-shared-keys --resource-group myResourceGroup --workspace-name hyperterse-logs --query primarySharedKey -o tsv)
+
+# Update container with log analytics
+az container create \
+  --resource-group myResourceGroup \
+  --name hyperterse \
+  --image hyperterseregistry.azurecr.io/hyperterse:latest \
+  --log-analytics-workspace $WORKSPACE_ID \
+  --log-analytics-workspace-key $WORKSPACE_KEY
+```
+
+### Create Alert Rules
+
+```bash
+az monitor metrics alert create \
+  --name hyperterse-cpu-alert \
+  --resource-group myResourceGroup \
+  --scopes $(az container show --resource-group myResourceGroup --name hyperterse --query id -o tsv) \
+  --condition "avg CpuUsage > 80" \
+  --description "Alert when CPU usage exceeds 80%"
+```
+
+## CI/CD with Azure DevOps
+
+Create `azure-pipelines.yml`:
+
+```yaml
+trigger:
+  - main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  imageRepository: 'hyperterse'
+  containerRegistry: 'hyperterseregistry.azurecr.io'
+  dockerfilePath: '$(Build.SourcesDirectory)/Dockerfile'
+  tag: '$(Build.BuildId)'
+
+stages:
+- stage: Build
+  displayName: Build and push image
+  jobs:
+  - job: Build
+    displayName: Build
+    steps:
+    - task: Docker@2
+      displayName: Build and push image
+      inputs:
+        command: buildAndPush
+        repository: $(imageRepository)
+        dockerfile: $(dockerfilePath)
+        containerRegistry: $(dockerRegistryServiceConnection)
+        tags: |
+          $(tag)
+          latest
+
+- stage: Deploy
+  displayName: Deploy to Container Instances
+  dependsOn: Build
+  jobs:
+  - deployment: Deploy
+    displayName: Deploy
+    environment: 'production'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: AzureCLI@2
+            inputs:
+              azureSubscription: $(azureSubscription)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az container delete --resource-group myResourceGroup --name hyperterse --yes
+                az container create \
+                  --resource-group myResourceGroup \
+                  --name hyperterse \
+                  --image $(containerRegistry)/$(imageRepository):$(tag) \
+                  --cpu 1 --memory 1 \
+                  --ports 8080
+```
+
+## Next Steps
+
+- Set up [Azure Front Door](https://azure.microsoft.com/en-us/services/frontdoor/) for global load balancing
+- Configure [Azure Application Insights](/runtime/observability)
+- Enable [Azure DDoS Protection](https://azure.microsoft.com/en-us/services/ddos-protection/)
+- Review [Azure security best practices](https://docs.microsoft.com/en-us/azure/security/)

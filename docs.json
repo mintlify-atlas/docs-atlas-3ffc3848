@@ -1,122 +1,125 @@
 {
-  "$schema": "https://mintlify.com/docs.json",
+  "$schema": "https://mintlify.com/schema.json",
+  "name": "Hyperterse",
+  "description": "The declarative MCP framework for building performant tool servers with database adapters and embedded scripting",
   "theme": "mint",
-  "name": "Mint Starter Kit",
-  "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+  "font": {
+    "family": "Inter"
   },
-  "favicon": "/favicon.svg",
+  "icons": {
+    "library": "tabler"
+  },
+  "colors": {
+    "primary": "#0D4A36",
+    "light": "#86efac",
+    "dark": "#0D4A36"
+  },
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/hyperterse/hyperterse"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/hyperterse/hyperterse",
+      "x": "https://x.com/hyperterse",
+      "bluesky": "https://bsky.app/profile/hyperterse.com"
+    }
+  },
+  "seo": {
+    "metatags": {
+      "og:title": "Hyperterse — Declarative MCP framework.",
+      "twitter:title": "Hyperterse — Declarative MCP framework.",
+      "og:description": "Production grade MCP tools that scale. Build declarative, deploy-ready AI tooling. No glue code.",
+      "twitter:description": "Production grade MCP tools that scale. Build declarative, deploy-ready AI tooling. No glue code."
+    }
+  },
   "navigation": {
     "tabs": [
       {
-        "tab": "Guides",
+        "tab": "Documentation",
         "groups": [
           {
-            "group": "Getting started",
+            "group": "Get Started",
+            "pages": ["introduction", "installation", "quickstart"]
+          },
+          {
+            "group": "Core Concepts",
             "pages": [
-              "index",
-              "quickstart",
-              "development"
+              "concepts/project-structure",
+              "concepts/adapters",
+              "concepts/tools",
+              "concepts/scripts",
+              "concepts/authentication"
             ]
           },
           {
-            "group": "Customization",
+            "group": "Runtime",
             "pages": [
-              "essentials/settings",
-              "essentials/navigation"
+              "runtime/mcp-transport",
+              "runtime/execution-pipeline",
+              "runtime/caching",
+              "runtime/observability"
             ]
           },
           {
-            "group": "Writing content",
+            "group": "Database Adapters",
             "pages": [
-              "essentials/markdown",
-              "essentials/code",
-              "essentials/images",
-              "essentials/reusable-snippets"
+              "databases/postgresql",
+              "databases/mysql",
+              "databases/mongodb",
+              "databases/redis"
             ]
           },
           {
-            "group": "AI tools",
+            "group": "Deployment",
             "pages": [
-              "ai-tools/cursor",
-              "ai-tools/claude-code",
-              "ai-tools/windsurf"
+              "deployment/overview",
+              "deployment/docker",
+              "deployment/kubernetes",
+              "deployment/bare-metal",
+              "deployment/aws",
+              "deployment/gcp",
+              "deployment/azure",
+              "deployment/railway",
+              "deployment/digital-ocean",
+              "deployment/cloudflare",
+              "deployment/vercel"
             ]
+          },
+          {
+            "group": "Security",
+            "pages": [
+              "security/input-safety",
+              "security/production-hardening"
+            ]
+          },
+          {
+            "group": "Migration",
+            "pages": ["migration/v1-to-v2"]
           }
         ]
       },
       {
-        "tab": "API reference",
+        "tab": "API Reference",
         "groups": [
           {
-            "group": "API documentation",
-            "pages": [
-              "api-reference/introduction"
-            ]
+            "group": "CLI Commands",
+            "pages": ["reference/cli"]
           },
           {
-            "group": "Endpoint examples",
+            "group": "Configuration",
             "pages": [
-              "api-reference/endpoint/get",
-              "api-reference/endpoint/create",
-              "api-reference/endpoint/delete",
-              "api-reference/endpoint/webhook"
+              "reference/root-config",
+              "reference/adapter-config",
+              "reference/tool-config",
+              "reference/environment-variables",
+              "reference/configuration-schemas"
             ]
           }
         ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
-  "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
-    "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://dashboard.mintlify.com"
-    }
-  },
-  "contextual": {
-    "options": [
-     "copy",
-     "view",
-     "chatgpt",
-     "claude",
-     "perplexity",
-     "mcp",
-     "cursor",
-     "vscode"
-   ]
-  },
-  "footer": {
-    "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
-    }
+    ]
   }
 }

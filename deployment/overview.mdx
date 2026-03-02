@@ -1,0 +1,131 @@
+---
+title: Deployment Overview
+description: Build and deploy Hyperterse to production environments
+---
+
+Hyperterse provides a simple build-to-deploy workflow that produces self-contained artifacts ready for production.
+
+## Build Process
+
+The `hyperterse build` command creates a portable distribution in the `dist/` directory (or custom path via `-o`):
+
+<Steps>
+  <Step title="Validate your configuration">
+    ```bash
+    hyperterse validate
+    ```
+  </Step>
+  
+  <Step title="Build the deployment artifact">
+    ```bash
+    hyperterse build -o dist
+    ```
+    
+    This generates:
+    - `dist/hyperterse` (or `hyperterse.exe` on Windows) - The runtime binary
+    - `dist/model.bin` - Compiled model manifest containing all tool definitions
+    - `dist/build/` - Bundled JavaScript tool scripts (if using custom handlers/transforms)
+  </Step>
+  
+  <Step title="Test locally">
+    ```bash
+    cd dist && ./hyperterse serve
+    ```
+  </Step>
+</Steps>
+
+## Deployment Workflow
+
+Once built, the `dist/` directory is completely self-contained and can be deployed to any platform:
+
+1. Copy the entire `dist/` folder to your target environment
+2. Run `./hyperterse serve` from within the `dist/` directory
+3. The server listens on port `8080` by default (configurable via `PORT` env var or `--port` flag)
+
+## Environment Configuration
+
+Hyperterse supports several environment variables for runtime configuration:
+
+| Variable | Description | Default |
+|----------|-------------|--------|
+| `PORT` | Server listening port | `8080` |
+| `HYPERTERSE_LOG_TAGS` | Filter logs by tags (comma-separated, use `-tag` to exclude) | (none) |
+| `HYPERTERSE_OTEL_ENDPOINT` | OpenTelemetry collector endpoint | `localhost:4317` |
+
+### Adapter Connection Strings
+
+Database adapters use environment variables for credentials. Reference them in your `.hyperterse` config:
+
+```yaml
+adapters:
+  - name: main-db
+    connector: postgres
+    connection: ${DATABASE_URL}
+```
+
+Then set `DATABASE_URL` in your deployment environment.
+
+## Health Checks
+
+Hyperterse provides a `/heartbeat` endpoint for health monitoring:
+
+```bash
+curl http://localhost:8080/heartbeat
+```
+
+Returns `200 OK` when the server is healthy.
+
+## Platform Selection
+
+Choose your deployment platform:
+
+<CardGroup cols={2}>
+  <Card title="Docker" icon="docker" href="/deployment/docker">
+    Containerize your Hyperterse server with Docker
+  </Card>
+  
+  <Card title="Kubernetes" icon="dharmachakra" href="/deployment/kubernetes">
+    Deploy to Kubernetes with autoscaling
+  </Card>
+  
+  <Card title="Bare Metal" icon="server" href="/deployment/bare-metal">
+    Run on Linux servers with systemd
+  </Card>
+  
+  <Card title="AWS" icon="aws" href="/deployment/aws">
+    Deploy to ECS Fargate or EC2
+  </Card>
+  
+  <Card title="Google Cloud" icon="google" href="/deployment/gcp">
+    Deploy to Cloud Run or GKE
+  </Card>
+  
+  <Card title="Azure" icon="microsoft" href="/deployment/azure">
+    Deploy to Container Instances or AKS
+  </Card>
+  
+  <Card title="Railway" icon="train" href="/deployment/railway">
+    Deploy to Railway with Git integration
+  </Card>
+  
+  <Card title="DigitalOcean" icon="digital-ocean" href="/deployment/digital-ocean">
+    Deploy to App Platform
+  </Card>
+</CardGroup>
+
+## Platform Limitations
+
+<Warning>
+  Hyperterse runs as a **long-running HTTP server** and requires persistent connections for MCP streaming.
+  
+  **Not compatible with:**
+  - Serverless function platforms (AWS Lambda, Vercel Functions, Netlify Functions)
+  - Short-lived execution environments
+  - Platforms without HTTP streaming support
+  
+  See [Cloudflare](/deployment/cloudflare) and [Vercel](/deployment/vercel) deployment guides for platform-specific notes.
+</Warning>
+
+## Next Steps
+
+Select your deployment platform from the cards above to see detailed setup instructions.

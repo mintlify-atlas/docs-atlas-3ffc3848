@@ -1,0 +1,397 @@
+---
+title: Kubernetes Deployment
+description: Deploy Hyperterse to Kubernetes with autoscaling and high availability
+---
+
+Deploy Hyperterse to Kubernetes for production-grade orchestration, scaling, and resilience.
+
+## Prerequisites
+
+- A Kubernetes cluster (v1.24+)
+- `kubectl` configured to access your cluster
+- A container registry (Docker Hub, GCR, ECR, etc.)
+- Docker image built from [Docker deployment guide](/deployment/docker)
+
+## Deployment Manifest
+
+Create `k8s/deployment.yaml`:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hyperterse
+  labels:
+    app: hyperterse
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: hyperterse
+  template:
+    metadata:
+      labels:
+        app: hyperterse
+    spec:
+      containers:
+      - name: hyperterse
+        image: your-registry/hyperterse:latest
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        env:
+        - name: PORT
+          value: "8080"
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: hyperterse-secrets
+              key: database-url
+        - name: HYPERTERSE_OTEL_ENDPOINT
+          value: "otel-collector:4317"
+        resources:
+          requests:
+            cpu: 250m
+            memory: 256Mi
+          limits:
+            cpu: 1000m
+            memory: 512Mi
+        livenessProbe:
+          httpGet:
+            path: /heartbeat
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 30
+          timeoutSeconds: 3
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /heartbeat
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 2
+        startupProbe:
+          httpGet:
+            path: /heartbeat
+            port: 8080
+          initialDelaySeconds: 0
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 12
+      restartPolicy: Always
+```
+
+## Service Configuration
+
+Create `k8s/service.yaml`:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: hyperterse
+  labels:
+    app: hyperterse
+spec:
+  type: ClusterIP
+  selector:
+    app: hyperterse
+  ports:
+  - port: 80
+    targetPort: 8080
+    protocol: TCP
+    name: http
+```
+
+For external access via LoadBalancer:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: hyperterse-external
+  labels:
+    app: hyperterse
+spec:
+  type: LoadBalancer
+  selector:
+    app: hyperterse
+  ports:
+  - port: 80
+    targetPort: 8080
+    protocol: TCP
+    name: http
+```
+
+## ConfigMap for Non-Sensitive Configuration
+
+Create `k8s/configmap.yaml`:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hyperterse-config
+data:
+  PORT: "8080"
+  HYPERTERSE_LOG_TAGS: ""
+  HYPERTERSE_OTEL_ENDPOINT: "otel-collector:4317"
+```
+
+Reference in deployment:
+
+```yaml
+envFrom:
+- configMapRef:
+    name: hyperterse-config
+```
+
+## Secrets Management
+
+Create `k8s/secret.yaml`:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hyperterse-secrets
+type: Opaque
+stringData:
+  database-url: "postgres://user:password@postgres:5432/mydb"
+  redis-url: "redis://redis:6379"
+```
+
+<Warning>
+  Never commit secrets to version control. Use tools like:
+  - [Sealed Secrets](https://github.com/bitnami-labs/sealed-secrets)
+  - [External Secrets Operator](https://external-secrets.io/)
+  - Cloud provider secret managers (AWS Secrets Manager, GCP Secret Manager, Azure Key Vault)
+</Warning>
+
+Apply secrets:
+
+```bash
+kubectl apply -f k8s/secret.yaml
+```
+
+## Deploy to Kubernetes
+
+<Steps>
+  <Step title="Build and push Docker image">
+    ```bash
+    docker build -t your-registry/hyperterse:latest .
+    docker push your-registry/hyperterse:latest
+    ```
+  </Step>
+  
+  <Step title="Apply Kubernetes manifests">
+    ```bash
+    kubectl apply -f k8s/configmap.yaml
+    kubectl apply -f k8s/secret.yaml
+    kubectl apply -f k8s/deployment.yaml
+    kubectl apply -f k8s/service.yaml
+    ```
+  </Step>
+  
+  <Step title="Verify deployment">
+    ```bash
+    kubectl get pods -l app=hyperterse
+    kubectl get svc hyperterse
+    ```
+  </Step>
+  
+  <Step title="Test the service">
+    ```bash
+    kubectl port-forward svc/hyperterse 8080:80
+    curl http://localhost:8080/heartbeat
+    ```
+  </Step>
+</Steps>
+
+## Horizontal Pod Autoscaler
+
+Create `k8s/hpa.yaml` to automatically scale based on CPU usage:
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: hyperterse-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: hyperterse
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 50
+        periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 30
+      - type: Pods
+        value: 2
+        periodSeconds: 30
+      selectPolicy: Max
+```
+
+Apply:
+
+```bash
+kubectl apply -f k8s/hpa.yaml
+```
+
+## Ingress Configuration
+
+For external HTTPS access with TLS, create `k8s/ingress.yaml`:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hyperterse-ingress
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - api.yourdomain.com
+    secretName: hyperterse-tls
+  rules:
+  - host: api.yourdomain.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: hyperterse
+            port:
+              number: 80
+```
+
+## Monitoring
+
+View logs:
+
+```bash
+kubectl logs -f deployment/hyperterse
+```
+
+Watch pod status:
+
+```bash
+kubectl get pods -l app=hyperterse -w
+```
+
+Describe deployment:
+
+```bash
+kubectl describe deployment hyperterse
+```
+
+## Rolling Updates
+
+Update to a new version:
+
+```bash
+kubectl set image deployment/hyperterse hyperterse=your-registry/hyperterse:v2
+```
+
+Or update the manifest and apply:
+
+```bash
+kubectl apply -f k8s/deployment.yaml
+kubectl rollout status deployment/hyperterse
+```
+
+Rollback if needed:
+
+```bash
+kubectl rollout undo deployment/hyperterse
+```
+
+## Production Best Practices
+
+<AccordionGroup>
+  <Accordion title="Resource Requests and Limits">
+    Always set resource requests and limits to ensure:
+    - Proper scheduling by Kubernetes
+    - Protection against resource exhaustion
+    - Accurate autoscaling metrics
+  </Accordion>
+  
+  <Accordion title="Pod Disruption Budgets">
+    Create a PodDisruptionBudget to ensure availability during maintenance:
+    
+    ```yaml
+    apiVersion: policy/v1
+    kind: PodDisruptionBudget
+    metadata:
+      name: hyperterse-pdb
+    spec:
+      minAvailable: 2
+      selector:
+        matchLabels:
+          app: hyperterse
+    ```
+  </Accordion>
+  
+  <Accordion title="Network Policies">
+    Restrict network access to your pods:
+    
+    ```yaml
+    apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata:
+      name: hyperterse-netpol
+    spec:
+      podSelector:
+        matchLabels:
+          app: hyperterse
+      policyTypes:
+      - Ingress
+      - Egress
+      ingress:
+      - from:
+        - podSelector:
+            matchLabels:
+              app: ingress-nginx
+        ports:
+        - protocol: TCP
+          port: 8080
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+- Set up [monitoring with OpenTelemetry](/runtime/observability)
+- Configure [log aggregation](/runtime/observability)
+- Review [Kubernetes security best practices](https://kubernetes.io/docs/concepts/security/)

@@ -1,0 +1,365 @@
+---
+title: Bare Metal Deployment
+description: Deploy Hyperterse directly to Linux servers using systemd
+---
+
+Deploy Hyperterse as a systemd service on Linux servers for lightweight, direct-to-metal deployments.
+
+## Prerequisites
+
+- Linux server (Ubuntu 20.04+, Debian 11+, or similar)
+- Sudo/root access
+- Built Hyperterse distribution (from `hyperterse build`)
+
+## Installation Steps
+
+<Steps>
+  <Step title="Build the deployment artifact">
+    On your development machine:
+    
+    ```bash
+    hyperterse validate
+    hyperterse build -o dist
+    ```
+  </Step>
+  
+  <Step title="Transfer to server">
+    ```bash
+    scp -r dist/ user@your-server:/opt/hyperterse/
+    ```
+    
+    Or use rsync:
+    
+    ```bash
+    rsync -avz dist/ user@your-server:/opt/hyperterse/
+    ```
+  </Step>
+  
+  <Step title="Create service user">
+    SSH into the server:
+    
+    ```bash
+    sudo useradd -r -s /bin/false hyperterse
+    sudo chown -R hyperterse:hyperterse /opt/hyperterse
+    sudo chmod +x /opt/hyperterse/hyperterse
+    ```
+  </Step>
+  
+  <Step title="Create environment file">
+    ```bash
+    sudo nano /opt/hyperterse/.env
+    ```
+    
+    Add your configuration:
+    
+    ```bash
+    PORT=8080
+    DATABASE_URL=postgres://user:pass@localhost:5432/mydb
+    REDIS_URL=redis://localhost:6379
+    HYPERTERSE_LOG_TAGS=
+    HYPERTERSE_OTEL_ENDPOINT=localhost:4317
+    ```
+    
+    Secure the file:
+    
+    ```bash
+    sudo chmod 600 /opt/hyperterse/.env
+    sudo chown hyperterse:hyperterse /opt/hyperterse/.env
+    ```
+  </Step>
+</Steps>
+
+## Systemd Service Configuration
+
+Create `/etc/systemd/system/hyperterse.service`:
+
+```ini
+[Unit]
+Description=Hyperterse MCP Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hyperterse
+Group=hyperterse
+WorkingDirectory=/opt/hyperterse
+ExecStart=/opt/hyperterse/hyperterse serve
+Restart=always
+RestartSec=10
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/hyperterse
+
+# Standard output and error to journal
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hyperterse
+
+[Install]
+WantedBy=multi-user.target
+```
+
+## Enable and Start Service
+
+<Steps>
+  <Step title="Reload systemd">
+    ```bash
+    sudo systemctl daemon-reload
+    ```
+  </Step>
+  
+  <Step title="Enable service to start on boot">
+    ```bash
+    sudo systemctl enable hyperterse
+    ```
+  </Step>
+  
+  <Step title="Start the service">
+    ```bash
+    sudo systemctl start hyperterse
+    ```
+  </Step>
+  
+  <Step title="Verify it's running">
+    ```bash
+    sudo systemctl status hyperterse
+    curl http://localhost:8080/heartbeat
+    ```
+  </Step>
+</Steps>
+
+## Service Management
+
+### View Logs
+
+```bash
+# Follow logs in real-time
+sudo journalctl -u hyperterse -f
+
+# View last 100 lines
+sudo journalctl -u hyperterse -n 100
+
+# View logs since today
+sudo journalctl -u hyperterse --since today
+
+# View logs with specific priority
+sudo journalctl -u hyperterse -p err
+```
+
+### Restart Service
+
+```bash
+sudo systemctl restart hyperterse
+```
+
+### Stop Service
+
+```bash
+sudo systemctl stop hyperterse
+```
+
+### Reload After Updates
+
+After deploying new build artifacts:
+
+```bash
+rsync -avz dist/ user@your-server:/opt/hyperterse/
+ssh user@your-server "sudo systemctl restart hyperterse"
+```
+
+## Log Rotation
+
+Configure journald log rotation in `/etc/systemd/journald.conf`:
+
+```ini
+[Journal]
+SystemMaxUse=500M
+SystemMaxFileSize=100M
+MaxRetentionSec=7day
+```
+
+Restart journald:
+
+```bash
+sudo systemctl restart systemd-journald
+```
+
+Or use logrotate for file-based logs if using `--log-file` flag:
+
+Create `/etc/logrotate.d/hyperterse`:
+
+```
+/tmp/.hyperterse/logs/*.log {
+    daily
+    missingok
+    rotate 7
+    compress
+    delaycompress
+    notifempty
+    create 0640 hyperterse hyperterse
+    sharedscripts
+    postrotate
+        systemctl reload hyperterse > /dev/null 2>&1 || true
+    endscript
+}
+```
+
+## Reverse Proxy with Nginx
+
+For HTTPS and better security, use nginx as a reverse proxy:
+
+```nginx
+server {
+    listen 80;
+    server_name api.yourdomain.com;
+    
+    # Redirect to HTTPS
+    return 301 https://$server_name$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name api.yourdomain.com;
+    
+    # SSL configuration
+    ssl_certificate /etc/letsencrypt/live/api.yourdomain.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/api.yourdomain.com/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    
+    # Proxy to Hyperterse
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        
+        # Timeouts for long-running requests
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+    }
+    
+    # Health check endpoint
+    location /heartbeat {
+        proxy_pass http://127.0.0.1:8080/heartbeat;
+        access_log off;
+    }
+}
+```
+
+Enable and restart nginx:
+
+```bash
+sudo ln -s /etc/nginx/sites-available/hyperterse /etc/nginx/sites-enabled/
+sudo nginx -t
+sudo systemctl restart nginx
+```
+
+## Monitoring and Health Checks
+
+### Systemd Health Check
+
+Add a health check to the systemd service:
+
+```ini
+[Service]
+ExecStartPost=/bin/sleep 5
+ExecStartPost=/usr/bin/curl -f http://localhost:8080/heartbeat || exit 1
+```
+
+### External Monitoring
+
+Set up monitoring with tools like:
+- **UptimeRobot** - External HTTP monitoring
+- **Prometheus** - Metrics collection (if exposing OpenTelemetry metrics)
+- **Grafana** - Visualization
+
+## Firewall Configuration
+
+If using nginx as reverse proxy, only expose port 443:
+
+```bash
+sudo ufw allow 22/tcp   # SSH
+sudo ufw allow 443/tcp  # HTTPS
+sudo ufw enable
+```
+
+If exposing Hyperterse directly:
+
+```bash
+sudo ufw allow 22/tcp   # SSH
+sudo ufw allow 8080/tcp # Hyperterse
+sudo ufw enable
+```
+
+## Production Best Practices
+
+<AccordionGroup>
+  <Accordion title="Security Hardening">
+    - Run as a dedicated non-root user
+    - Use restrictive file permissions (600 for .env)
+    - Enable systemd security features (NoNewPrivileges, ProtectSystem, etc.)
+    - Use firewall rules to restrict access
+    - Keep the system and dependencies updated
+  </Accordion>
+  
+  <Accordion title="Backup and Recovery">
+    Create a backup script:
+    
+    ```bash
+    #!/bin/bash
+    tar -czf /backup/hyperterse-$(date +%Y%m%d).tar.gz /opt/hyperterse
+    ```
+    
+    Schedule with cron:
+    
+    ```bash
+    0 2 * * * /usr/local/bin/backup-hyperterse.sh
+    ```
+  </Accordion>
+  
+  <Accordion title="Automated Deployments">
+    Use deployment scripts with systemd:
+    
+    ```bash
+    #!/bin/bash
+    set -e
+    
+    # Deploy new version
+    rsync -avz dist/ /opt/hyperterse-new/
+    sudo systemctl stop hyperterse
+    sudo mv /opt/hyperterse /opt/hyperterse-backup
+    sudo mv /opt/hyperterse-new /opt/hyperterse
+    sudo systemctl start hyperterse
+    
+    # Verify
+    sleep 5
+    curl -f http://localhost:8080/heartbeat || {
+      sudo systemctl stop hyperterse
+      sudo mv /opt/hyperterse-backup /opt/hyperterse
+      sudo systemctl start hyperterse
+      exit 1
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+- Set up [log aggregation](/runtime/observability)
+- Configure [monitoring and alerting](/runtime/observability)
+- Review [security best practices](/security/production-hardening)

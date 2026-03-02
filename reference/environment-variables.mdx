@@ -1,0 +1,312 @@
+---
+title: Environment Variables
+description: Environment variables for configuring Hyperterse runtime behavior
+---
+
+Hyperterse supports environment variables to override configuration file settings and control runtime behavior. Environment variables take precedence over configuration file values.
+
+## Core Environment Variables
+
+### PORT
+
+<ParamField path="PORT" type="string">
+  Override the server port at runtime.
+  
+  **Default:** `8080`
+  
+  **Precedence:**
+  1. CLI flag `--port` or `-p`
+  2. `PORT` environment variable
+  3. `.hyperterse` file `server.port`
+  4. Default: `8080`
+  
+  ```bash
+  PORT=3000 hyperterse start
+  ```
+  
+  ```bash
+  export PORT=3000
+  hyperterse start
+  ```
+</ParamField>
+
+### HYPERTERSE_LOG_TAGS
+
+<ParamField path="HYPERTERSE_LOG_TAGS" type="string">
+  Filter logs by tags. Use comma-separated tags, prefix with `-` to exclude.
+  
+  **Precedence:**
+  1. CLI flag `--log-tags`
+  2. `HYPERTERSE_LOG_TAGS` environment variable
+  
+  **Examples:**
+  
+  Show only `mcp` and `server` logs:
+  ```bash
+  export HYPERTERSE_LOG_TAGS="mcp,server"
+  hyperterse start
+  ```
+  
+  Exclude `debug` logs:
+  ```bash
+  export HYPERTERSE_LOG_TAGS="-debug"
+  hyperterse start
+  ```
+  
+  Show `runtime` logs but exclude `trace`:
+  ```bash
+  HYPERTERSE_LOG_TAGS="runtime,-trace" hyperterse start
+  ```
+</ParamField>
+
+## OpenTelemetry (OTEL) Environment Variables
+
+OpenTelemetry integration for observability is controlled via environment variables. These features may require a paid subscription.
+
+### HYPERTERSE_OTEL_ENABLED
+
+<ParamField path="HYPERTERSE_OTEL_ENABLED" type="boolean" default="false">
+  Enable or disable OpenTelemetry observability.
+  
+  ```bash
+  export HYPERTERSE_OTEL_ENABLED=true
+  hyperterse start
+  ```
+</ParamField>
+
+### HYPERTERSE_OTEL_TRACES_ENABLED
+
+<ParamField path="HYPERTERSE_OTEL_TRACES_ENABLED" type="boolean" default="true">
+  Enable distributed tracing. Only applies when `HYPERTERSE_OTEL_ENABLED=true`.
+  
+  ```bash
+  export HYPERTERSE_OTEL_ENABLED=true
+  export HYPERTERSE_OTEL_TRACES_ENABLED=true
+  ```
+</ParamField>
+
+### HYPERTERSE_OTEL_METRICS_ENABLED
+
+<ParamField path="HYPERTERSE_OTEL_METRICS_ENABLED" type="boolean" default="true">
+  Enable metrics collection. Only applies when `HYPERTERSE_OTEL_ENABLED=true`.
+  
+  ```bash
+  export HYPERTERSE_OTEL_ENABLED=true
+  export HYPERTERSE_OTEL_METRICS_ENABLED=true
+  ```
+</ParamField>
+
+### HYPERTERSE_OTEL_LOGS_ENABLED
+
+<ParamField path="HYPERTERSE_OTEL_LOGS_ENABLED" type="boolean" default="true">
+  Enable structured log export to OTLP endpoint. Only applies when `HYPERTERSE_OTEL_ENABLED=true`.
+  
+  ```bash
+  export HYPERTERSE_OTEL_ENABLED=true
+  export HYPERTERSE_OTEL_LOGS_ENABLED=true
+  ```
+</ParamField>
+
+### HYPERTERSE_OTEL_SERVICE_NAME
+
+<ParamField path="HYPERTERSE_OTEL_SERVICE_NAME" type="string" default="hyperterse">
+  Service name for OpenTelemetry metadata.
+  
+  ```bash
+  export HYPERTERSE_OTEL_SERVICE_NAME="my-service"
+  ```
+</ParamField>
+
+### HYPERTERSE_OTEL_SERVICE_VERSION
+
+<ParamField path="HYPERTERSE_OTEL_SERVICE_VERSION" type="string" default="dev">
+  Service version for OpenTelemetry metadata.
+  
+  ```bash
+  export HYPERTERSE_OTEL_SERVICE_VERSION="1.0.0"
+  ```
+</ParamField>
+
+### HYPERTERSE_OTEL_ENVIRONMENT
+
+<ParamField path="HYPERTERSE_OTEL_ENVIRONMENT" type="string" default="development">
+  Environment name for OpenTelemetry metadata (e.g., `production`, `staging`, `development`).
+  
+  ```bash
+  export HYPERTERSE_OTEL_ENVIRONMENT="production"
+  ```
+</ParamField>
+
+### HYPERTERSE_OTEL_ENDPOINT
+
+<ParamField path="HYPERTERSE_OTEL_ENDPOINT" type="string" default="localhost:4317">
+  OTLP endpoint for sending telemetry data.
+  
+  ```bash
+  export HYPERTERSE_OTEL_ENDPOINT="otel-collector:4317"
+  ```
+</ParamField>
+
+### HYPERTERSE_OTEL_PROTOCOL
+
+<ParamField path="HYPERTERSE_OTEL_PROTOCOL" type="string" default="grpc">
+  OTLP protocol to use (`grpc` or `http`).
+  
+  ```bash
+  export HYPERTERSE_OTEL_PROTOCOL="grpc"
+  ```
+</ParamField>
+
+### HYPERTERSE_OTEL_TRACE_SAMPLING_RATIO
+
+<ParamField path="HYPERTERSE_OTEL_TRACE_SAMPLING_RATIO" type="float" default="1.0">
+  Trace sampling rate between 0.0 and 1.0. Use `1.0` to sample all traces, `0.5` to sample 50%, etc.
+  
+  ```bash
+  export HYPERTERSE_OTEL_TRACE_SAMPLING_RATIO="0.1"
+  ```
+</ParamField>
+
+## Environment Variable Substitution in Config
+
+Configuration files support environment variable substitution using the `{{ env.VAR_NAME }}` syntax:
+
+```yaml
+# .hyperterse
+name: my-project
+version: "{{ env.APP_VERSION }}"
+
+server:
+  port: "{{ env.PORT }}"
+```
+
+```yaml
+# app/adapters/db.terse
+connector: postgres
+connection_string: "{{ env.DATABASE_URL }}"
+options:
+  sslmode: "{{ env.DB_SSL_MODE }}"
+```
+
+**Set the variables:**
+```bash
+export APP_VERSION="1.2.0"
+export PORT="8080"
+export DATABASE_URL="postgresql://user:pass@localhost/db"
+export DB_SSL_MODE="require"
+```
+
+<Warning>
+  Environment variable substitution requires the variable to be set. Missing variables will cause an error:
+  ```
+  environment variable 'DATABASE_URL' not found
+  ```
+</Warning>
+
+## .env File Support
+
+Hyperterse automatically loads `.env` files in the following order (first found wins):
+
+1. `.env.local`
+2. `.env.development`
+3. `.env`
+
+**Search locations:**
+1. Directory containing the config file (e.g., where `.hyperterse` is located)
+2. Current working directory
+3. Directory containing the `hyperterse` executable
+
+**Example `.env` file:**
+```bash
+# .env
+PORT=3000
+DATABASE_URL=postgresql://localhost/mydb
+HYPERTERSE_LOG_TAGS=mcp,server
+HYPERTERSE_OTEL_ENABLED=true
+```
+
+<Note>
+  System environment variables always take precedence over `.env` file values.
+</Note>
+
+## Configuration Precedence
+
+Configuration values are resolved in the following order (highest to lowest):
+
+1. **CLI flags** - `--port`, `--log-level`, `--verbose`, `--log-tags`
+2. **Environment variables** - `PORT`, `HYPERTERSE_*`
+3. **`.env` files** - `.env.local`, `.env.development`, `.env`
+4. **Configuration files** - `.hyperterse`, `config.terse`
+5. **Default values** - Built-in framework defaults
+
+### Example Precedence Chain
+
+For the `port` setting:
+
+```bash
+# Default: 8080
+# .hyperterse: server.port = 9000
+# .env: PORT=3000
+# CLI: --port 5000
+
+hyperterse start --port 5000
+# Result: Uses port 5000 (CLI flag wins)
+```
+
+```bash
+# Default: 8080
+# .hyperterse: server.port = 9000
+# .env: PORT=3000
+
+hyperterse start
+# Result: Uses port 3000 (env var wins over config file)
+```
+
+```bash
+# Default: 8080
+# .hyperterse: server.port = 9000
+
+hyperterse start
+# Result: Uses port 9000 (config file wins over default)
+```
+
+## Complete OTEL Example
+
+Enable full OpenTelemetry observability:
+
+```bash
+export HYPERTERSE_OTEL_ENABLED=true
+export HYPERTERSE_OTEL_TRACES_ENABLED=true
+export HYPERTERSE_OTEL_METRICS_ENABLED=true
+export HYPERTERSE_OTEL_LOGS_ENABLED=true
+export HYPERTERSE_OTEL_SERVICE_NAME="my-service"
+export HYPERTERSE_OTEL_SERVICE_VERSION="1.0.0"
+export HYPERTERSE_OTEL_ENVIRONMENT="production"
+export HYPERTERSE_OTEL_ENDPOINT="otel-collector:4317"
+export HYPERTERSE_OTEL_PROTOCOL="grpc"
+export HYPERTERSE_OTEL_TRACE_SAMPLING_RATIO="0.5"
+
+hyperterse start
+```
+
+Or use a `.env` file:
+
+```bash
+# .env.production
+HYPERTERSE_OTEL_ENABLED=true
+HYPERTERSE_OTEL_TRACES_ENABLED=true
+HYPERTERSE_OTEL_METRICS_ENABLED=true
+HYPERTERSE_OTEL_LOGS_ENABLED=true
+HYPERTERSE_OTEL_SERVICE_NAME=my-service
+HYPERTERSE_OTEL_SERVICE_VERSION=1.0.0
+HYPERTERSE_OTEL_ENVIRONMENT=production
+HYPERTERSE_OTEL_ENDPOINT=otel-collector:4317
+HYPERTERSE_OTEL_PROTOCOL=grpc
+HYPERTERSE_OTEL_TRACE_SAMPLING_RATIO=0.5
+```
+
+## Related
+
+- [Root Configuration](/reference/root-config) - Configure `.hyperterse` file
+- [Adapter Configuration](/reference/adapter-config) - Use env vars in connection strings
+- [Tool Configuration](/reference/tool-config) - Configure MCP tools

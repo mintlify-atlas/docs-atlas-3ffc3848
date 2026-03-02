@@ -1,0 +1,309 @@
+---
+title: MySQL Adapter
+description: Connect Hyperterse tools to MySQL and MariaDB databases
+---
+
+The MySQL adapter enables Hyperterse tools to execute SQL queries against MySQL and MariaDB databases with automatic connection pooling and health checks.
+
+## Connection String Format
+
+MySQL adapters support two formats, with automatic conversion to the DSN format required by the MySQL driver:
+
+### URL Format (Recommended)
+
+```
+mysql://[user[:password]@][host][:port][/database][?option=value&...]
+```
+
+The adapter automatically converts this to MySQL's DSN format.
+
+### DSN Format
+
+```
+user:password@tcp(host:port)/database?option=value&...
+```
+
+## Adapter Configuration
+
+Create a `.terse` file in your `adapters/` directory:
+
+```yaml adapters/mysql-db.terse
+connector: mysql
+connection_string: mysql://myuser:mypass@localhost:3306/mydb
+options:
+  parseTime: true
+  charset: utf8mb4
+  timeout: 10s
+```
+
+## Available Options
+
+Options are appended to the connection string as query parameters:
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `parseTime` | boolean | Parse `DATE` and `DATETIME` to `time.Time` (recommended: `true`) |
+| `charset` | string | Character set for the connection (default: `utf8mb4`) |
+| `collation` | string | Collation for the connection |
+| `timeout` | duration | Connection timeout (e.g., `10s`, `500ms`) |
+| `readTimeout` | duration | I/O read timeout |
+| `writeTimeout` | duration | I/O write timeout |
+| `loc` | string | Location for time.Time values (default: `UTC`) |
+| `maxAllowedPacket` | number | Max packet size (default: 64MB) |
+| `tls` | string | TLS configuration: `true`, `false`, `skip-verify`, or custom name |
+| `allowNativePasswords` | boolean | Allow native password authentication |
+| `allowOldPasswords` | boolean | Allow old password hashing (not recommended) |
+
+See the [go-sql-driver/mysql documentation](https://github.com/go-sql-driver/mysql#parameters) for all available options.
+
+## Connection String Conversion
+
+The adapter automatically converts URL format to DSN format (core/runtime/connectors/mysql.go:34-75):
+
+```yaml
+# You provide:
+connection_string: mysql://user:pass@db.example.com:3306/production?parseTime=true
+
+# Adapter converts to:
+# user:pass@tcp(db.example.com:3306)/production?parseTime=true
+```
+
+Default port `3306` is used if not specified.
+
+## Example Tool Using MySQL
+
+```yaml tools/get-order/config.terse
+description: "Fetch order details from MySQL"
+use: mysql-db
+statement: |
+  SELECT 
+    o.id,
+    o.customer_id,
+    o.total,
+    o.status,
+    o.created_at
+  FROM orders o
+  WHERE o.id = {{ inputs.orderId }}
+inputs:
+  orderId:
+    type: int
+    description: "Order ID to fetch"
+auth:
+  plugin: allow_all
+```
+
+## Connection Pooling
+
+The MySQL adapter automatically manages connection pooling:
+
+- **Pool Creation**: A connection pool is established when the adapter is initialized
+- **Connection Reuse**: Connections are reused across multiple tool executions
+- **Health Checks**: The adapter pings the database on initialization to verify connectivity (core/runtime/connectors/mysql.go:100)
+- **Automatic Cleanup**: Connections are properly closed when the runtime shuts down
+
+The Go `database/sql` package manages the pool internally with sensible defaults.
+
+## Health Checks
+
+The MySQL adapter performs health checks during initialization:
+
+```go
+// Health check on connection
+if err := db.Ping(); err != nil {
+    return nil, fmt.Errorf("failed to ping mysql database: %w", err)
+}
+```
+
+This ensures the database is reachable and credentials are valid before accepting requests.
+
+## SSL/TLS Configuration
+
+<Note>
+For production environments, enable TLS to encrypt connections to MySQL.
+</Note>
+
+### Basic TLS
+
+```yaml adapters/mysql-secure.terse
+connector: mysql
+connection_string: mysql://user:pass@db.example.com:3306/production
+options:
+  tls: true
+  parseTime: true
+```
+
+### Skip Certificate Verification (Not Recommended)
+
+```yaml
+options:
+  tls: skip-verify
+```
+
+<Warning>
+Only use `tls=skip-verify` in development. Production systems should verify certificates.
+</Warning>
+
+### Custom TLS Configuration
+
+For custom TLS configurations with specific certificates, you'll need to register a custom TLS config in your Go code before initializing the adapter.
+
+## Authentication
+
+<Tabs>
+  <Tab title="Password Authentication">
+    ```yaml
+    connector: mysql
+    connection_string: mysql://myuser:mypassword@localhost:3306/mydb
+    ```
+  </Tab>
+  
+  <Tab title="No Password">
+    ```yaml
+    connector: mysql
+    connection_string: mysql://myuser@localhost:3306/mydb
+    ```
+  </Tab>
+  
+  <Tab title="Environment Variable">
+    ```yaml
+    connector: mysql
+    connection_string: mysql://${DB_USER}:${DB_PASS}@${DB_HOST}:3306/mydb
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+Never commit passwords directly in `.terse` files. Use environment variables or secret management systems.
+</Note>
+
+## Query Execution
+
+Queries are executed using Go's `database/sql` package with context support:
+
+- Supports `SELECT`, `INSERT`, `UPDATE`, `DELETE`, and other SQL statements
+- Returns results as an array of maps: `[]map[string]any`
+- Binary data (`[]byte`) is automatically converted to strings for JSON serialization
+- All queries execute within the request context for automatic cancellation
+- Set `parseTime=true` to automatically parse `DATE` and `DATETIME` columns
+
+## Limitations
+
+<Warning>
+The `json_statements` option is **not supported** for MySQL. Use standard SQL syntax.
+</Warning>
+
+MySQL adapters expect SQL statements, not JSON-formatted commands.
+
+## Character Sets and Collation
+
+<Note>
+Always use `charset=utf8mb4` for full Unicode support, including emoji and special characters.
+</Note>
+
+```yaml adapters/mysql-unicode.terse
+connector: mysql
+connection_string: mysql://user:pass@localhost:3306/mydb
+options:
+  charset: utf8mb4
+  collation: utf8mb4_unicode_ci
+  parseTime: true
+```
+
+## Example: Complete Adapter Setup
+
+```yaml adapters/ecommerce-db.terse
+connector: mysql
+connection_string: mysql://ecommerce_user:secure_pass@mysql.internal:3306/ecommerce
+options:
+  parseTime: true
+  charset: utf8mb4
+  collation: utf8mb4_unicode_ci
+  timeout: 15s
+  readTimeout: 30s
+  writeTimeout: 30s
+  tls: true
+  maxAllowedPacket: 67108864
+```
+
+```yaml tools/search-products/config.terse
+description: "Search products by name"
+use: ecommerce-db
+statement: |
+  SELECT 
+    id,
+    name,
+    description,
+    price,
+    stock_quantity,
+    category
+  FROM products
+  WHERE name LIKE CONCAT('%', {{ inputs.searchTerm }}, '%')
+  AND stock_quantity > 0
+  ORDER BY name
+  LIMIT 50
+inputs:
+  searchTerm:
+    type: string
+    description: "Product name to search for"
+auth:
+  plugin: allow_all
+```
+
+## MariaDB Compatibility
+
+The MySQL adapter works with MariaDB databases. Use the same configuration:
+
+```yaml adapters/mariadb.terse
+connector: mysql
+connection_string: mysql://user:pass@mariadb.example.com:3306/mydb
+options:
+  parseTime: true
+  charset: utf8mb4
+```
+
+## Troubleshooting
+
+### Connection Refused
+
+Ensure MySQL is running and accessible:
+
+```bash
+mysql -h localhost -u myuser -p mydb
+```
+
+### Character Set Issues
+
+If you see garbled characters, ensure you're using `utf8mb4`:
+
+```yaml
+options:
+  charset: utf8mb4
+```
+
+### Time Zone Issues
+
+Set the location for time values:
+
+```yaml
+options:
+  parseTime: true
+  loc: America/New_York
+```
+
+### Packet Too Large
+
+If you see "packet too large" errors, increase the limit:
+
+```yaml
+options:
+  maxAllowedPacket: 134217728  # 128MB
+```
+
+### Authentication Plugin Issues
+
+For older MySQL versions using legacy authentication:
+
+```yaml
+options:
+  allowNativePasswords: true
+```

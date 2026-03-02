@@ -1,0 +1,244 @@
+---
+title: Project Structure
+description: Understand Hyperterse's filesystem conventions for organizing tools, adapters, and scripts
+---
+
+Hyperterse uses a convention-based filesystem structure to automatically discover and compile your tools and database adapters. This approach eliminates boilerplate configuration while maintaining flexibility.
+
+## Directory Layout
+
+A typical Hyperterse project follows this structure:
+
+```
+my-project/
+├── hyperterse.yaml          # Main configuration file
+└── app/                     # Default discovery root
+    ├── adapters/            # Database adapter definitions
+    │   ├── my-adapter.terse
+    │   └── analytics.terse
+    └── tools/               # Tool definitions
+        ├── get-user/
+        │   ├── config.terse
+        │   ├── user-input-validator.ts
+        │   └── user-data-mapper.ts
+        └── analytics/
+            └── daily-report/
+                └── config.terse
+```
+
+## Configuration Root
+
+By default, Hyperterse looks for an `app/` directory at the same level as your `hyperterse.yaml` configuration file. You can customize these paths:
+
+```yaml hyperterse.yaml
+root: app
+tools:
+  directory: tools
+adapters:
+  directory: adapters
+```
+
+<Note>
+All directory paths can be absolute or relative to the `hyperterse.yaml` file location.
+</Note>
+
+## Adapter Discovery
+
+Adapters are discovered by walking the `adapters/` directory and finding all files with the `.terse` extension. Each `.terse` file defines a single database connection.
+
+<CodeGroup>
+```yaml adapters/my-adapter.terse
+connector: postgres
+connection_string: postgresql://demo:demo@localhost:5432/demo
+options:
+  sslmode: disable
+```
+
+```yaml adapters/analytics.terse
+connector: redis
+connection_string: "redis://localhost:6379/0"
+```
+</CodeGroup>
+
+**Adapter naming:**
+- If the `name` field is omitted, the filename (without `.terse` extension) becomes the adapter name
+- Reference adapters by name in your tool definitions using the `use` field
+
+## Tool Discovery
+
+Tools are discovered by finding all files named **`config.terse`** within the `tools/` directory tree. Each `config.terse` file defines a single tool.
+
+### Tool Paths and Names
+
+The directory structure determines the tool's path and default name:
+
+```
+tools/
+├── get-user/
+│   └── config.terse          # Tool path: "get-user"
+│                             # Tool name: "get-user"
+└── analytics/
+    └── daily-report/
+        └── config.terse      # Tool path: "analytics/daily-report"
+                              # Tool name: "analytics-daily-report"
+```
+
+**Normalization rules** (from `core/framework/types.go:90-109`):
+- Directory separators (`/`) become hyphens (`-`) in tool names
+- Special characters are replaced with hyphens
+- Tool names are lowercased
+- Empty segments default to `"index"`
+
+<Warning>
+Duplicate tool names will cause a compilation error. Use the `name` field in `config.terse` to override auto-generated names if needed.
+</Warning>
+
+## Tool Directory Contents
+
+Each tool directory can contain:
+
+1. **`config.terse`** (required) - Tool definition and metadata
+2. **TypeScript scripts** (optional) - Custom handlers and transforms
+
+### Script Auto-Discovery
+
+Hyperterse automatically discovers TypeScript files in the tool directory based on filename conventions:
+
+<Tabs>
+  <Tab title="Input Transform">
+    **Auto-discovered filenames:**
+    - `input.ts`
+    - Any file containing both `input` and `validator` (e.g., `user-input-validator.ts`)
+
+    Runs **before** the database query to validate and transform inputs.
+  </Tab>
+  
+  <Tab title="Output Transform">
+    **Auto-discovered filenames:**
+    - `output.ts`
+    - Any file containing both `data` and `mapper` (e.g., `user-data-mapper.ts`)
+
+    Runs **after** the database query to transform results.
+  </Tab>
+  
+  <Tab title="Handler">
+    **Auto-discovered filenames:**
+    - `handler.ts`
+    - Any file containing `handler` (e.g., `weather-handler.ts`)
+
+    **Only for script-backed tools** (tools without `use` adapter binding).
+    
+    <Note>
+    Handler auto-discovery is disabled for database-backed tools to prevent accidental overrides.
+    </Note>
+  </Tab>
+</Tabs>
+
+You can also explicitly reference scripts in `config.terse`:
+
+```yaml config.terse
+mappers:
+  input: "./custom-input.ts"
+  output: "./custom-output.ts"
+handler: "./custom-handler.ts"
+```
+
+### Script Export Names
+
+By default, Hyperterse calls the `default` export from each script. You can specify a named export:
+
+```yaml config.terse
+mappers:
+  input: "./validators.ts#validateUser"
+  output: "./mappers.ts#formatUserData"
+```
+
+## Build Output
+
+During compilation, Hyperterse bundles all TypeScript scripts and generates build artifacts:
+
+```
+dist/
+└── build/
+    ├── vendor.bundle.js      # Bundled npm dependencies
+    └── tools/
+        ├── get-user.input_transform.bundle.js
+        ├── get-user.output_transform.bundle.js
+        └── get-weather.handler.bundle.js
+```
+
+<Note>
+The `dist/` directory can be customized using the `export.out` field in `hyperterse.yaml`.
+</Note>
+
+## Real-World Example
+
+Here's how the demo project structure maps to compiled tools:
+
+<CodeGroup>
+```bash Filesystem
+app/
+├── adapters/
+│   └── my-adapter.terse
+└── tools/
+    ├── get-user/
+    │   ├── config.terse
+    │   ├── user-input-validator.ts
+    │   └── user-data-mapper.ts
+    └── get-weather/
+        ├── config.terse
+        └── weather-handler.ts
+```
+
+```yaml get-user/config.terse
+description: "Get user by id, with input validation and response mapping."
+use: my-adapter
+statement: |
+  SELECT * FROM users WHERE id = {{ inputs.userId }}
+inputs:
+  userId:
+    type: int
+    description: "User ID to fetch."
+mappers:
+  input: "./user-input-validator.ts"
+  output: "./user-data-mapper.ts"
+auth:
+  plugin: allow_all
+```
+</CodeGroup>
+
+**Compilation result:**
+- **Adapter**: `my-adapter` (PostgreSQL connection)
+- **Tool name**: `get-user`
+- **Tool path**: `get-user`
+- **Input transform**: Bundled from `user-input-validator.ts`
+- **Output transform**: Bundled from `user-data-mapper.ts`
+
+## Environment Variables
+
+Connection strings support environment variable substitution at runtime:
+
+```yaml adapters/production.terse
+connector: postgres
+connection_string: postgresql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:5432/${DB_NAME}
+options:
+  sslmode: require
+```
+
+<Warning>
+Environment variables are substituted when the server starts, not at build time.
+</Warning>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Adapters" icon="database" href="/concepts/adapters">
+    Learn about the database adapter system
+  </Card>
+  <Card title="Tools" icon="wrench" href="/concepts/tools">
+    Understand tool definition and discovery
+  </Card>
+  <Card title="Scripts" icon="code" href="/concepts/scripts">
+    Write TypeScript handlers and transforms
+  </Card>
+</CardGroup>

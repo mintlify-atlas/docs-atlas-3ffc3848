@@ -1,0 +1,257 @@
+---
+title: Cloudflare Deployment
+description: Deployment options and limitations for Cloudflare platforms
+---
+
+Learn about deploying Hyperterse on Cloudflare infrastructure and understand platform limitations.
+
+## Important Limitations
+
+<Warning>
+  **Hyperterse is NOT compatible with standard Cloudflare Workers.**
+  
+  Hyperterse requires a **long-running HTTP server** with persistent connections for MCP streaming. Cloudflare Workers are designed for:
+  - Short-lived request/response cycles (max 30 seconds CPU time)
+  - Stateless, edge-based execution
+  - No persistent HTTP connections
+  
+  This architectural difference makes Workers unsuitable for Hyperterse.
+</Warning>
+
+## Why Cloudflare Workers Don't Work
+
+Cloudflare Workers have fundamental limitations that conflict with Hyperterse:
+
+| Requirement | Hyperterse Needs | Workers Provide |
+|-------------|------------------|------------------|
+| **Process Model** | Long-running server | Short-lived isolates |
+| **HTTP Connections** | Persistent WebSocket/SSE | Request/response only |
+| **Execution Time** | Unlimited | 30s CPU time limit |
+| **State** | In-memory caching | Stateless execution |
+| **Database Connections** | Connection pooling | Per-request connections |
+
+## Alternative: Cloudflare Pages (Custom Runtime)
+
+<Note>
+  Cloudflare Pages now supports **custom runtimes** via Docker containers, but this feature is in beta and has limitations.
+</Note>
+
+Cloudflare Pages with custom runtimes might work, but:
+- Still in beta (not production-ready)
+- Limited documentation
+- No persistent connection guarantees
+- Better alternatives exist (see recommendations below)
+
+## Recommended Cloudflare-Adjacent Solutions
+
+If you want to use Cloudflare services, consider these architectures:
+
+### 1. Cloudflare + External Server
+
+Deploy Hyperterse elsewhere and use Cloudflare for:
+- **DNS management**
+- **DDoS protection** (Cloudflare Proxy)
+- **CDN for static assets**
+- **Load balancing** (Cloudflare Load Balancer)
+
+```
+User Request → Cloudflare DNS/Proxy → Your Server (AWS/GCP/Railway)
+                                         ↓
+                                   Hyperterse Server
+```
+
+**Setup:**
+
+<Steps>
+  <Step title="Deploy Hyperterse to compatible platform">
+    Choose from:
+    - [Railway](/deployment/railway)
+    - [AWS ECS](/deployment/aws)
+    - [Google Cloud Run](/deployment/gcp)
+    - [DigitalOcean App Platform](/deployment/digital-ocean)
+  </Step>
+  
+  <Step title="Configure Cloudflare DNS">
+    1. Add your domain to Cloudflare
+    2. Create an A or CNAME record pointing to your server
+    3. Enable Cloudflare proxy (orange cloud) for DDoS protection
+  </Step>
+  
+  <Step title="Configure SSL/TLS">
+    1. Set SSL/TLS mode to "Full (strict)"
+    2. Enable "Always Use HTTPS"
+    3. Configure origin certificates if needed
+  </Step>
+</Steps>
+
+### 2. Cloudflare Workers + Reverse Proxy
+
+Use Workers as a reverse proxy to your Hyperterse server:
+
+```javascript
+// worker.js
+export default {
+  async fetch(request, env) {
+    // Proxy all MCP requests to your Hyperterse server
+    const url = new URL(request.url);
+    url.hostname = 'your-hyperterse-server.com';
+    url.port = '8080';
+    
+    return fetch(url, {
+      method: request.method,
+      headers: request.headers,
+      body: request.body,
+    });
+  }
+}
+```
+
+Deploy:
+
+```bash
+npm install -g wrangler
+wrangler init my-proxy
+# Add worker.js code above
+wrangler deploy
+```
+
+**Limitations:**
+- Workers still have 30s timeout
+- No WebSocket support in Workers (use Durable Objects)
+- Better to use Cloudflare proxy directly (simpler)
+
+### 3. Cloudflare Tunnel (cloudflared)
+
+Expose your on-premise or private Hyperterse server through Cloudflare Tunnel:
+
+```bash
+# Install cloudflared
+brew install cloudflare/cloudflare/cloudflared
+
+# Login
+cloudflared tunnel login
+
+# Create tunnel
+cloudflared tunnel create hyperterse
+
+# Configure tunnel
+cat > ~/.cloudflared/config.yml <<EOF
+tunnel: hyperterse
+credentials-file: /path/to/credentials.json
+
+ingress:
+  - hostname: api.yourdomain.com
+    service: http://localhost:8080
+  - service: http_status:404
+EOF
+
+# Run tunnel
+cloudflared tunnel run hyperterse
+```
+
+This is ideal for:
+- Development environments
+- On-premise deployments
+- Private networks
+
+## What About Cloudflare R2 or D1?
+
+### Cloudflare R2 (Object Storage)
+
+✅ **Compatible** - You can use R2 as storage backend:
+
+```yaml
+# In your tool config
+adapters:
+  - name: storage
+    connector: s3  # R2 is S3-compatible
+    connection: ${R2_ENDPOINT}
+```
+
+R2 endpoints work with S3-compatible clients.
+
+### Cloudflare D1 (SQLite Database)
+
+❌ **Not directly compatible** - D1 is only accessible from Workers.
+
+Workaround: Create a Worker that exposes D1 via HTTP API, then use Hyperterse's HTTP-based tools to query it.
+
+## Comparison: Cloudflare vs. Better Alternatives
+
+| Platform | Hyperterse Support | Cost | Ease of Use |
+|----------|-------------------|------|-------------|
+| **Cloudflare Workers** | ❌ Not compatible | Low | High |
+| **Cloudflare Pages (beta)** | ⚠️ Experimental | Low | Medium |
+| **Railway** | ✅ Fully supported | Low-Medium | Very High |
+| **Cloud Run (GCP)** | ✅ Fully supported | Low-Medium | High |
+| **Fly.io** | ✅ Fully supported | Low-Medium | High |
+| **DigitalOcean App Platform** | ✅ Fully supported | Medium | High |
+
+## When to Use Cloudflare with Hyperterse
+
+✅ **Good use cases:**
+- DNS management and routing
+- DDoS protection for your Hyperterse server
+- CDN for static assets (if serving any)
+- Cloudflare Tunnel for exposing private servers
+- Load balancing across multiple Hyperterse instances
+
+❌ **Not suitable for:**
+- Running Hyperterse directly on Workers
+- Long-running background jobs
+- Persistent WebSocket connections
+- Stateful application logic
+
+## Recommended Architecture
+
+If you love Cloudflare's ecosystem:
+
+```
+┌─────────────────────────────────────────────┐
+│              Cloudflare                      │
+│  ┌────────┐  ┌────────┐  ┌──────────────┐  │
+│  │  DNS   │  │  WAF   │  │ Load Balancer│  │
+│  └────────┘  └────────┘  └──────────────┘  │
+└──────────────────┬──────────────────────────┘
+                   │
+        ┌──────────┴──────────┐
+        │                     │
+   ┌────▼─────┐         ┌────▼─────┐
+   │ Railway  │         │ Cloud Run│
+   │Hyperterse│         │Hyperterse│
+   └──────────┘         └──────────┘
+        │                     │
+   ┌────▼────────────────────▼────┐
+   │   Cloudflare R2 (Storage)    │
+   └──────────────────────────────┘
+```
+
+## Summary
+
+<CardGroup cols={2}>
+  <Card title="Use Cloudflare For" icon="check">
+    - DNS and routing
+    - DDoS protection
+    - CDN and caching
+    - Cloudflare Tunnel
+    - Load balancing
+  </Card>
+  
+  <Card title="Don't Use Cloudflare For" icon="xmark">
+    - Running Hyperterse directly
+    - Long-running servers
+    - Persistent connections
+    - Stateful processes
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+Deploy Hyperterse to a compatible platform:
+
+- [Railway](/deployment/railway) - Easiest deployment
+- [Google Cloud Run](/deployment/gcp) - Serverless containers
+- [AWS ECS](/deployment/aws) - Enterprise-grade
+- [DigitalOcean](/deployment/digital-ocean) - Simple and affordable
+
+Then use Cloudflare for DNS, security, and traffic management.

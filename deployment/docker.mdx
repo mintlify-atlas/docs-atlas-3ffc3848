@@ -1,0 +1,220 @@
+---
+title: Docker Deployment
+description: Deploy Hyperterse in Docker containers
+---
+
+Deploy Hyperterse as a Docker container for consistent, portable deployments.
+
+## Multi-Stage Dockerfile
+
+Create a `Dockerfile` in your project root:
+
+```dockerfile
+# Build stage
+FROM golang:1.23-alpine AS builder
+
+WORKDIR /build
+
+# Install build dependencies
+RUN apk add --no-cache git
+
+# Copy project files
+COPY . .
+
+# Build the deployment artifact
+RUN go run main.go build -o /dist
+
+# Runtime stage
+FROM alpine:latest
+
+WORKDIR /app
+
+# Install runtime dependencies
+RUN apk add --no-cache ca-certificates
+
+# Copy built artifacts from builder
+COPY --from=builder /dist /app
+
+# Expose port
+EXPOSE 8080
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:8080/heartbeat || exit 1
+
+# Run the server
+CMD ["./hyperterse", "serve"]
+```
+
+## Using Pre-Built Binary
+
+If you have a pre-built `dist/` folder:
+
+```dockerfile
+FROM alpine:latest
+
+WORKDIR /app
+
+# Install runtime dependencies
+RUN apk add --no-cache ca-certificates
+
+# Copy pre-built distribution
+COPY dist/ /app/
+
+# Expose port
+EXPOSE 8080
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:8080/heartbeat || exit 1
+
+# Run the server
+CMD ["./hyperterse", "serve"]
+```
+
+## Build and Run
+
+<Steps>
+  <Step title="Build the Docker image">
+    ```bash
+    docker build -t hyperterse-server:latest .
+    ```
+  </Step>
+  
+  <Step title="Run the container">
+    ```bash
+    docker run -d \
+      --name hyperterse \
+      -p 8080:8080 \
+      -e DATABASE_URL="postgres://user:pass@db:5432/mydb" \
+      -e HYPERTERSE_LOG_TAGS="" \
+      hyperterse-server:latest
+    ```
+  </Step>
+  
+  <Step title="Verify it's running">
+    ```bash
+    curl http://localhost:8080/heartbeat
+    ```
+  </Step>
+</Steps>
+
+## Environment Variables
+
+Pass environment variables to configure the runtime:
+
+```bash
+docker run -d \
+  --name hyperterse \
+  -p 8080:8080 \
+  -e PORT=8080 \
+  -e DATABASE_URL="postgres://localhost:5432/mydb" \
+  -e REDIS_URL="redis://localhost:6379" \
+  -e HYPERTERSE_OTEL_ENDPOINT="localhost:4317" \
+  hyperterse-server:latest
+```
+
+## Volume Mounts
+
+If you need to mount `.env` files or external configuration:
+
+```bash
+docker run -d \
+  --name hyperterse \
+  -p 8080:8080 \
+  -v $(pwd)/.env:/app/.env:ro \
+  hyperterse-server:latest
+```
+
+<Note>
+  Hyperterse automatically loads `.env` files from the working directory. The server runtime looks for `.env` in the same directory as the `model.bin` manifest.
+</Note>
+
+## Docker Compose
+
+Example `docker-compose.yml` with a PostgreSQL database:
+
+```yaml
+version: '3.8'
+
+services:
+  hyperterse:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - DATABASE_URL=postgres://postgres:password@db:5432/hyperterse
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "http://localhost:8080/heartbeat"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_DB=hyperterse
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  postgres_data:
+```
+
+Run with:
+
+```bash
+docker-compose up -d
+```
+
+## Production Considerations
+
+<AccordionGroup>
+  <Accordion title="Security">
+    - Run as non-root user inside the container
+    - Use Docker secrets for sensitive environment variables
+    - Scan images for vulnerabilities with `docker scan`
+    - Use specific image tags instead of `latest`
+  </Accordion>
+  
+  <Accordion title="Resource Limits">
+    Set CPU and memory limits:
+    
+    ```bash
+    docker run -d \
+      --name hyperterse \
+      --cpus="1.0" \
+      --memory="512m" \
+      -p 8080:8080 \
+      hyperterse-server:latest
+    ```
+  </Accordion>
+  
+  <Accordion title="Logging">
+    View logs:
+    
+    ```bash
+    docker logs -f hyperterse
+    ```
+    
+    Or configure JSON logging and forward to a centralized system.
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+- Deploy to [Kubernetes](/deployment/kubernetes) for orchestration
+- Use [AWS ECS](/deployment/aws) for managed container hosting
+- Set up [health monitoring](/deployment/overview#health-checks)

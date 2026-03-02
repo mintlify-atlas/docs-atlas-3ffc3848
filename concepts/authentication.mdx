@@ -1,0 +1,476 @@
+---
+title: Authentication & Authorization
+description: Secure tool access with pluggable per-tool authentication using built-in or custom auth plugins
+---
+
+Hyperterse provides a flexible **per-tool authentication system** using pluggable auth plugins. Each tool can specify its own authorization requirements, allowing fine-grained access control.
+
+## How Auth Works
+
+Authentication is enforced at the **tool invocation level**. Before a tool executes, Hyperterse:
+
+1. **Checks** if the tool defines an `auth.plugin`
+2. **Loads** the corresponding auth plugin from the registry
+3. **Calls** the plugin's `Authorize()` method with request context
+4. **Allows** execution if authorized, or **rejects** with an error
+
+From `core/framework/engine.go:41-49`:
+
+```go
+func (e *Engine) Execute(ctx context.Context, toolName string, userInputs map[string]any) ([]map[string]any, error) {
+    tool := e.GetTool(toolName)
+    
+    // Authorization check (first step in pipeline)
+    if err := e.authRegistry.Authorize(ctx, tool); err != nil {
+        return nil, err
+    }
+    
+    // ... rest of execution pipeline
+}
+```
+
+## Tool-Level Auth Configuration
+
+Define authentication per tool in `config.terse`:
+
+```yaml tools/get-user/config.terse
+description: "Get user by ID"
+use: my-adapter
+statement: SELECT * FROM users WHERE id = {{ inputs.userId }}
+inputs:
+  userId:
+    type: int
+auth:
+  plugin: api_key
+  policy:
+    value: "${ADMIN_API_KEY}"
+```
+
+### Auth Schema
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `auth.plugin` | string | No | Auth plugin name (e.g., `allow_all`, `api_key`) |
+| `auth.policy` | map | No | Plugin-specific configuration |
+
+<Note>
+If `auth` is not defined, the tool has **no authentication** and allows all requests.
+</Note>
+
+## Built-in Auth Plugins
+
+Hyperterse includes two built-in plugins:
+
+### 1. `allow_all` Plugin
+
+Always allows access. Useful for public tools or development.
+
+```yaml
+auth:
+  plugin: allow_all
+```
+
+**Implementation** (`core/framework/auth.go:95-100`):
+
+```go
+type allowAllPlugin struct{}
+
+func (allowAllPlugin) Name() string { return "allow_all" }
+func (allowAllPlugin) Authorize(context.Context, AuthRequest) error {
+    return nil
+}
+```
+
+### 2. `api_key` Plugin
+
+Validates an API key from the `X-API-Key` HTTP header.
+
+```yaml
+auth:
+  plugin: api_key
+  policy:
+    value: "${API_KEY}"  # Can reference environment variable
+```
+
+**Implementation** (`core/framework/auth.go:102-118`):
+
+```go
+type apiKeyPlugin struct{}
+
+func (apiKeyPlugin) Name() string { return "api_key" }
+func (apiKeyPlugin) Authorize(_ context.Context, req AuthRequest) error {
+    provided := strings.TrimSpace(req.Header.Get("X-API-Key"))
+    expected := strings.TrimSpace(req.Policy["value"])
+    
+    // Fallback to environment variable
+    if expected == "" {
+        expected = strings.TrimSpace(os.Getenv("HYPERTERSE_API_KEY"))
+    }
+    
+    if expected == "" {
+        return fmt.Errorf("api_key plugin is configured but no expected key is set")
+    }
+    
+    if provided == "" || provided != expected {
+        return fmt.Errorf("unauthorized: invalid api key")
+    }
+    
+    return nil
+}
+```
+
+**Usage:**
+
+<Tabs>
+  <Tab title="Environment Variable">
+    Set the expected key via environment:
+    
+    ```bash
+    export HYPERTERSE_API_KEY="your-secret-key"
+    ```
+    
+    ```yaml config.terse
+    auth:
+      plugin: api_key
+    ```
+    
+    Clients must send:
+    
+    ```bash
+    curl -H "X-API-Key: your-secret-key" http://localhost:8080/mcp/tools/get-user
+    ```
+  </Tab>
+  
+  <Tab title="Policy Configuration">
+    Define the key directly in policy (supports env vars):
+    
+    ```yaml config.terse
+    auth:
+      plugin: api_key
+      policy:
+        value: "${MY_CUSTOM_API_KEY}"
+    ```
+    
+    ```bash
+    export MY_CUSTOM_API_KEY="custom-key-123"
+    ```
+  </Tab>
+</Tabs>
+
+<Warning>
+API keys should always be stored in environment variables, not hardcoded in configuration files.
+</Warning>
+
+## Auth Plugin Interface
+
+Custom plugins implement the `AuthPlugin` interface (`core/framework/auth.go:33-37`):
+
+```go
+type AuthPlugin interface {
+    Name() string
+    Authorize(ctx context.Context, req AuthRequest) error
+}
+```
+
+### AuthRequest Structure
+
+Plugins receive an `AuthRequest` with tool and request context (`core/framework/auth.go:26-31`):
+
+```go
+type AuthRequest struct {
+    Tool   *Tool                // Tool being invoked
+    Policy map[string]string    // Tool's auth.policy configuration
+    Header http.Header          // HTTP request headers
+}
+```
+
+## Creating Custom Auth Plugins
+
+You can register custom auth plugins programmatically:
+
+### Example: JWT Plugin
+
+```go jwt_plugin.go
+package main
+
+import (
+    "context"
+    "fmt"
+    "net/http"
+    "strings"
+    
+    "github.com/golang-jwt/jwt/v5"
+    "github.com/hyperterse/hyperterse/core/framework"
+)
+
+type jwtPlugin struct{}
+
+func (jwtPlugin) Name() string { return "jwt" }
+
+func (jwtPlugin) Authorize(ctx context.Context, req framework.AuthRequest) error {
+    authHeader := req.Header.Get("Authorization")
+    if authHeader == "" {
+        return fmt.Errorf("unauthorized: missing Authorization header")
+    }
+    
+    tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+    if tokenString == authHeader {
+        return fmt.Errorf("unauthorized: invalid Authorization header format")
+    }
+    
+    // Parse JWT
+    secret := req.Policy["secret"]
+    if secret == "" {
+        return fmt.Errorf("jwt plugin requires 'secret' in policy")
+    }
+    
+    token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+        if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+            return nil, fmt.Errorf("unexpected signing method")
+        }
+        return []byte(secret), nil
+    })
+    
+    if err != nil || !token.Valid {
+        return fmt.Errorf("unauthorized: invalid JWT")
+    }
+    
+    // Optional: Check claims
+    claims, ok := token.Claims.(jwt.MapClaims)
+    if !ok {
+        return fmt.Errorf("unauthorized: invalid JWT claims")
+    }
+    
+    requiredRole := req.Policy["required_role"]
+    if requiredRole != "" {
+        userRole, _ := claims["role"].(string)
+        if userRole != requiredRole {
+            return fmt.Errorf("unauthorized: insufficient permissions")
+        }
+    }
+    
+    return nil
+}
+
+func init() {
+    framework.RegisterAuthPlugin(jwtPlugin{})
+}
+```
+
+### Using the Custom Plugin
+
+```yaml tools/admin/delete-user/config.terse
+description: "Delete user (admin only)"
+use: my-adapter
+statement: DELETE FROM users WHERE id = {{ inputs.userId }}
+inputs:
+  userId:
+    type: int
+auth:
+  plugin: jwt
+  policy:
+    secret: "${JWT_SECRET}"
+    required_role: "admin"
+```
+
+**Client request:**
+
+```bash
+curl -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." \
+  http://localhost:8080/mcp/tools/delete-user
+```
+
+## Auth Registry
+
+The `AuthRegistry` manages plugin registration and lookup (`core/framework/auth.go:39-78`):
+
+```go
+type AuthRegistry struct {
+    mu      sync.RWMutex
+    plugins map[string]AuthPlugin
+}
+
+func (r *AuthRegistry) Register(plugin AuthPlugin) {
+    r.mu.Lock()
+    defer r.mu.Unlock()
+    r.plugins[strings.ToLower(plugin.Name())] = plugin
+}
+
+func (r *AuthRegistry) Get(name string) (AuthPlugin, bool) {
+    r.mu.RLock()
+    defer r.mu.RUnlock()
+    p, ok := r.plugins[strings.ToLower(name)]
+    return p, ok
+}
+```
+
+**Plugin names are case-insensitive:**
+
+```yaml
+auth:
+  plugin: API_KEY  # Same as "api_key"
+```
+
+## Request Context Propagation
+
+HTTP headers are propagated to auth plugins via context (`core/framework/auth.go:14-24`):
+
+```go
+func WithRequestHeaders(ctx context.Context, headers http.Header) context.Context {
+    return context.WithValue(ctx, requestHeadersContextKey, headers)
+}
+
+func requestHeadersFromContext(ctx context.Context) http.Header {
+    headers, _ := ctx.Value(requestHeadersContextKey).(http.Header)
+    return headers
+}
+```
+
+This allows plugins to access:
+- `Authorization` header
+- `X-API-Key` header  
+- Custom headers (e.g., `X-Tenant-ID`)
+
+## Multi-Tenancy Example
+
+Create a tenant-based auth plugin:
+
+```go tenant_plugin.go
+type tenantPlugin struct{}
+
+func (tenantPlugin) Name() string { return "tenant" }
+
+func (tenantPlugin) Authorize(ctx context.Context, req framework.AuthRequest) error {
+    tenantID := req.Header.Get("X-Tenant-ID")
+    if tenantID == "" {
+        return fmt.Errorf("unauthorized: missing X-Tenant-ID header")
+    }
+    
+    allowedTenants := strings.Split(req.Policy["allowed_tenants"], ",")
+    for _, allowed := range allowedTenants {
+        if strings.TrimSpace(allowed) == tenantID {
+            return nil
+        }
+    }
+    
+    return fmt.Errorf("unauthorized: tenant %s not allowed", tenantID)
+}
+```
+
+```yaml config.terse
+auth:
+  plugin: tenant
+  policy:
+    allowed_tenants: "tenant-1,tenant-2,tenant-3"
+```
+
+## Error Messages
+
+Auth errors abort execution and return the error to the caller:
+
+```bash
+curl -X POST http://localhost:8080/mcp/tools/get-user \
+  -H "Content-Type: application/json" \
+  -d '{"userId": 123}'
+```
+
+**Response (401 Unauthorized):**
+
+```json
+{
+  "error": "unauthorized: invalid api key"
+}
+```
+
+## Auth Bypass (No Auth)
+
+Tools without `auth` configuration allow all requests:
+
+```yaml tools/public/health-check/config.terse
+description: "Public health check endpoint"
+handler: "./health.ts"
+# No auth block — allows all requests
+```
+
+## Per-Tool Flexibility
+
+Different tools can use different auth strategies:
+
+<CodeGroup>
+```yaml tools/public/stats/config.terse
+# Public endpoint
+description: "Public statistics"
+use: analytics-db
+statement: SELECT COUNT(*) as total FROM events
+# No auth
+```
+
+```yaml tools/internal/user-detail/config.terse
+# Requires API key
+description: "Internal user detail"
+use: users-db
+statement: SELECT * FROM users WHERE id = {{ inputs.userId }}
+auth:
+  plugin: api_key
+```
+
+```yaml tools/admin/delete-user/config.terse
+# Requires JWT with admin role
+description: "Delete user (admin only)"
+use: users-db
+statement: DELETE FROM users WHERE id = {{ inputs.userId }}
+auth:
+  plugin: jwt
+  policy:
+    secret: "${JWT_SECRET}"
+    required_role: "admin"
+```
+</CodeGroup>
+
+## Global Registration
+
+Register plugins globally using `RegisterAuthPlugin` (`core/framework/auth.go:52-55`):
+
+```go main.go
+package main
+
+import (
+    "github.com/hyperterse/hyperterse/core/framework"
+)
+
+func init() {
+    framework.RegisterAuthPlugin(jwtPlugin{})
+    framework.RegisterAuthPlugin(tenantPlugin{})
+    framework.RegisterAuthPlugin(oauthPlugin{})
+}
+```
+
+Plugins registered globally are available to all runtime engines.
+
+## Security Best Practices
+
+<Warning>
+**Do:**
+- Store secrets in environment variables
+- Use HTTPS in production
+- Implement rate limiting for auth failures
+- Rotate API keys regularly
+- Log auth failures for security monitoring
+
+**Don't:**
+- Hardcode API keys in `config.terse` files
+- Commit `.env` files with secrets to version control
+- Use `allow_all` in production for sensitive tools
+- Share API keys across multiple tools without purpose
+</Warning>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Tools" icon="wrench" href="/concepts/tools">
+    Learn how to define and configure tools
+  </Card>
+  <Card title="Scripts" icon="code" href="/concepts/scripts">
+    Write custom auth logic in TypeScript handlers
+  </Card>
+</CardGroup>

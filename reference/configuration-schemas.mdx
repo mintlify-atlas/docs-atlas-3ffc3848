@@ -1,0 +1,386 @@
+---
+title: Configuration Schemas
+description: JSON schemas for validation and IDE integration
+---
+
+Hyperterse provides JSON schemas for all configuration files, enabling validation, autocomplete, and inline documentation in modern code editors.
+
+## Available Schemas
+
+### Root Configuration Schema
+
+**URL:** `https://raw.githubusercontent.com/hyperterse/hyperterse/refs/heads/main/schema/root.terse.schema.json`
+
+**File:** `.hyperterse`
+
+**Schema ID:** `HyperterseRootConfig`
+
+**Purpose:** Validates project-level configuration including server settings, build configuration, and directory structure.
+
+**Local path in repository:** `schema/root.terse.schema.json`
+
+### Adapter Configuration Schema
+
+**URL:** `https://raw.githubusercontent.com/hyperterse/hyperterse/refs/heads/main/schema/adapter.terse.schema.json`
+
+**Files:** `*.terse` in adapters directory
+
+**Schema ID:** `HyperterseAdapterConfig`
+
+**Purpose:** Validates adapter configuration files that define database connections.
+
+**Local path in repository:** `schema/adapter.terse.schema.json`
+
+### Tool Configuration Schema
+
+**URL:** `https://raw.githubusercontent.com/hyperterse/hyperterse/refs/heads/main/schema/tool.terse.schema.json`
+
+**Files:** `config.terse` in tool directories
+
+**Schema ID:** `HyperterseToolConfig`
+
+**Purpose:** Validates tool configuration files that define MCP tools.
+
+**Local path in repository:** `schema/tool.terse.schema.json`
+
+## IDE Integration
+
+### YAML Language Server
+
+Most modern editors support the YAML language server, which can automatically validate YAML files against JSON schemas.
+
+#### VS Code
+
+Install the [YAML extension](https://marketplace.visualstudio.com/items?itemName=redhat.vscode-yaml).
+
+Add schema reference to your config files:
+
+```yaml
+# yaml-language-server: $schema=https://raw.githubusercontent.com/hyperterse/hyperterse/refs/heads/main/schema/root.terse.schema.json
+
+name: my-project
+version: 1.0.0
+```
+
+Or configure globally in `.vscode/settings.json`:
+
+```json
+{
+  "yaml.schemas": {
+    "https://raw.githubusercontent.com/hyperterse/hyperterse/refs/heads/main/schema/root.terse.schema.json": ".hyperterse",
+    "https://raw.githubusercontent.com/hyperterse/hyperterse/refs/heads/main/schema/adapter.terse.schema.json": "app/adapters/*.terse",
+    "https://raw.githubusercontent.com/hyperterse/hyperterse/refs/heads/main/schema/tool.terse.schema.json": "app/tools/*/config.terse"
+  }
+}
+```
+
+#### JetBrains IDEs
+
+JetBrains IDEs (IntelliJ IDEA, WebStorm, PyCharm) have built-in YAML support.
+
+Add schema reference to your files:
+
+```yaml
+# yaml-language-server: $schema=https://raw.githubusercontent.com/hyperterse/hyperterse/refs/heads/main/schema/root.terse.schema.json
+
+name: my-project
+```
+
+Or configure in **Settings → Languages & Frameworks → Schemas and DTDs → JSON Schema Mappings**:
+- Add schema URL
+- Map to file pattern (e.g., `.hyperterse`, `**/adapters/*.terse`)
+
+#### Neovim
+
+Use [yaml-language-server](https://github.com/redhat-developer/yaml-language-server) with your LSP client.
+
+Example with `nvim-lspconfig`:
+
+```lua
+require('lspconfig').yamlls.setup {
+  settings = {
+    yaml = {
+      schemas = {
+        ["https://raw.githubusercontent.com/hyperterse/hyperterse/refs/heads/main/schema/root.terse.schema.json"] = ".hyperterse",
+        ["https://raw.githubusercontent.com/hyperterse/hyperterse/refs/heads/main/schema/adapter.terse.schema.json"] = "app/adapters/*.terse",
+        ["https://raw.githubusercontent.com/hyperterse/hyperterse/refs/heads/main/schema/tool.terse.schema.json"] = "app/tools/*/config.terse",
+      }
+    }
+  }
+}
+```
+
+## Validation Process
+
+Hyperterse validates configuration files at multiple stages:
+
+### 1. Parse-Time Validation
+
+When loading configuration files, Hyperterse:
+- Parses YAML syntax
+- Validates against JSON schema
+- Checks required fields
+- Validates field types and patterns
+
+### 2. Semantic Validation
+
+After parsing, Hyperterse performs semantic validation:
+- Ensures adapter references exist
+- Validates tool input/output types
+- Checks for naming conflicts
+- Validates connector-specific options
+
+### 3. Runtime Validation
+
+During server startup:
+- Tests database connections
+- Validates handler script existence
+- Checks mapper script exports
+- Validates auth plugin availability
+
+## Schema Validation Examples
+
+### Root Configuration Validation
+
+**Valid:**
+```yaml
+name: my-project
+version: 1.0.0
+server:
+  port: 8080
+  log_level: 3
+```
+
+**Invalid - missing required field:**
+```yaml
+version: 1.0.0
+server:
+  port: 8080
+```
+**Error:** `name is required`
+
+**Invalid - wrong pattern:**
+```yaml
+name: My-Project
+```
+**Error:** `name must match pattern ^[a-z][a-z0-9_-]*$`
+
+**Invalid - port out of range:**
+```yaml
+name: my-project
+server:
+  port: 99999
+```
+**Error:** `port must be between 1 and 65535`
+
+### Adapter Configuration Validation
+
+**Valid:**
+```yaml
+connector: postgres
+connection_string: postgresql://localhost/db
+```
+
+**Invalid - missing required field:**
+```yaml
+connector: postgres
+```
+**Error:** `connection_string is required`
+
+**Invalid - invalid connector:**
+```yaml
+connector: sqlite
+connection_string: sqlite://db.sqlite
+```
+**Error:** `connector must be one of: postgres, redis, mysql, mongodb`
+
+### Tool Configuration Validation
+
+**Valid:**
+```yaml
+use: my-adapter
+statement: SELECT * FROM users
+```
+
+**Valid:**
+```yaml
+handler: "./handler.ts"
+```
+
+**Invalid - both use and handler:**
+```yaml
+use: my-adapter
+handler: "./handler.ts"
+```
+**Error:** `tool must have either 'use' or 'handler', not both`
+
+**Invalid - neither use nor handler:**
+```yaml
+description: "My tool"
+inputs:
+  id:
+    type: int
+```
+**Error:** `tool must have either 'use' or 'handler'`
+
+**Invalid - wrong input type:**
+```yaml
+use: adapter
+inputs:
+  count:
+    type: number
+```
+**Error:** `type must be one of: string, int, float, boolean, datetime`
+
+**Invalid - default type mismatch:**
+```yaml
+use: adapter
+inputs:
+  count:
+    type: int
+    default: "10"
+```
+**Error:** `default must be integer when type is int`
+
+## Schema Format
+
+All schemas follow JSON Schema Draft 07 specification.
+
+### Schema Structure
+
+```json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://raw.githubusercontent.com/hyperterse/hyperterse/refs/heads/main/schema/root.terse.schema.json",
+  "title": "HyperterseRootConfig",
+  "description": "Schema for root project configuration files",
+  "type": "object",
+  "properties": {
+    // Field definitions
+  },
+  "required": ["name"],
+  "additionalProperties": false
+}
+```
+
+### Key Schema Features
+
+- **Type validation** - Ensures correct data types
+- **Pattern validation** - Validates strings against regex patterns
+- **Range validation** - Enforces min/max values
+- **Required fields** - Ensures critical fields are present
+- **Enum validation** - Restricts to specific allowed values
+- **Additional properties** - Prevents typos and unknown fields
+
+## Using Schemas Programmatically
+
+### JavaScript/TypeScript
+
+Use [ajv](https://ajv.js.org/) for schema validation:
+
+```typescript
+import Ajv from "ajv";
+import * as yaml from "js-yaml";
+import * as fs from "fs";
+
+const ajv = new Ajv();
+
+// Load schema
+const schemaUrl = "https://raw.githubusercontent.com/hyperterse/hyperterse/refs/heads/main/schema/root.terse.schema.json";
+const schema = await fetch(schemaUrl).then(r => r.json());
+
+// Compile validator
+const validate = ajv.compile(schema);
+
+// Load and validate config
+const config = yaml.load(fs.readFileSync(".hyperterse", "utf8"));
+
+if (!validate(config)) {
+  console.error("Validation errors:", validate.errors);
+}
+```
+
+### Python
+
+Use [jsonschema](https://python-jsonschema.readthedocs.io/):
+
+```python
+import yaml
+import requests
+from jsonschema import validate, ValidationError
+
+# Load schema
+schema_url = "https://raw.githubusercontent.com/hyperterse/hyperterse/refs/heads/main/schema/root.terse.schema.json"
+schema = requests.get(schema_url).json()
+
+# Load config
+with open(".hyperterse") as f:
+    config = yaml.safe_load(f)
+
+# Validate
+try:
+    validate(instance=config, schema=schema)
+    print("Valid configuration")
+except ValidationError as e:
+    print(f"Validation error: {e.message}")
+```
+
+### Go
+
+Use [gojsonschema](https://github.com/xeipuuv/gojsonschema):
+
+```go
+package main
+
+import (
+    "fmt"
+    "github.com/xeipuuv/gojsonschema"
+    "gopkg.in/yaml.v3"
+    "os"
+)
+
+func main() {
+    // Load schema
+    schemaLoader := gojsonschema.NewReferenceLoader(
+        "https://raw.githubusercontent.com/hyperterse/hyperterse/refs/heads/main/schema/root.terse.schema.json",
+    )
+
+    // Load config
+    configBytes, _ := os.ReadFile(".hyperterse")
+    var config interface{}
+    yaml.Unmarshal(configBytes, &config)
+
+    // Validate
+    documentLoader := gojsonschema.NewGoLoader(config)
+    result, err := gojsonschema.Validate(schemaLoader, documentLoader)
+    
+    if err != nil {
+        panic(err)
+    }
+
+    if !result.Valid() {
+        for _, err := range result.Errors() {
+            fmt.Printf("%s\n", err)
+        }
+    }
+}
+```
+
+## Schema Versioning
+
+Schemas are versioned alongside the Hyperterse framework:
+
+- **main branch** - Latest development version
+- **Tagged releases** - Specific version (e.g., `v2.0.0`)
+
+Use version-specific schemas for production:
+
+```yaml
+# yaml-language-server: $schema=https://raw.githubusercontent.com/hyperterse/hyperterse/refs/tags/v2.0.0/schema/root.terse.schema.json
+```
+
+## Related
+
+- [Root Configuration](/reference/root-config) - `.hyperterse` file reference
+- [Adapter Configuration](/reference/adapter-config) - Adapter `.terse` file reference
+- [Tool Configuration](/reference/tool-config) - Tool `config.terse` file reference

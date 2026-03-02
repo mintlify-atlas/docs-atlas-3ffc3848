@@ -1,0 +1,304 @@
+---
+title: MCP Transport
+description: Model Context Protocol over Streamable HTTP
+---
+
+Hyperterse implements the [Model Context Protocol (MCP)](https://modelcontextprotocol.io) using **Streamable HTTP** transport, enabling LLM clients to discover and execute tools over standard HTTP endpoints.
+
+## Architecture
+
+The MCP adapter bridges the MCP SDK with Hyperterse's execution engine:
+
+```
+MCP Client (e.g., Claude Desktop)
+        |
+        | HTTP (GET/POST/DELETE)
+        v
+  /mcp endpoint
+        |
+        v
+  MCP SDK Handler (Streamable HTTP)
+        |
+        v
+   MCP Adapter
+        |
+        v
+  Executor → Tool Execution
+```
+
+**Implementation:** `core/runtime/mcp/mcp.go:32-67`
+
+## Endpoints
+
+### POST /mcp
+
+Executes MCP protocol operations (initialize, tools/list, tools/call).
+
+**Headers:**
+- `Content-Type: application/json`
+- `MCP-Protocol-Version: 2024-11-05` (optional)
+- `Mcp-Session-Id: <uuid>` (for session reuse)
+
+**Request Body:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "execute",
+    "arguments": {
+      "tool": "get_user",
+      "inputs": {
+        "user_id": "123"
+      }
+    }
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "[{\"id\":\"123\",\"name\":\"John Doe\"}]"
+      }
+    ]
+  }
+}
+```
+
+### GET /mcp
+
+Server-Sent Events (SSE) endpoint for streaming notifications.
+
+**Headers:**
+- `Accept: text/event-stream`
+- `Last-Event-ID: <id>` (optional, for reconnection)
+
+### DELETE /mcp
+
+Terminates an active MCP session.
+
+**Headers:**
+- `Mcp-Session-Id: <uuid>`
+
+### GET /heartbeat
+
+Health check endpoint.
+
+**Response:**
+```json
+{"success": true}
+```
+
+**Implementation:** `core/runtime/server/server.go:176-184`
+
+## MCP Tools
+
+The adapter exposes two meta-tools to MCP clients:
+
+### 1. search
+
+Discover tools by natural language query.
+
+**Input Schema:**
+```json
+{
+  "type": "object",
+  "properties": {
+    "query": {
+      "type": "string",
+      "description": "Natural-language query used to find relevant tools."
+    }
+  },
+  "required": ["query"]
+}
+```
+
+**Example Request:**
+```json
+{
+  "name": "search",
+  "arguments": {
+    "query": "find customer orders"
+  }
+}
+```
+
+**Example Response:**
+```json
+[
+  {
+    "name": "get_orders",
+    "relevance_score": 95,
+    "description": "Retrieve customer orders",
+    "statement": "SELECT * FROM orders WHERE customer_id = {{input.customer_id}}",
+    "inputs": [
+      {
+        "name": "customer_id",
+        "type": "string",
+        "optional": false
+      }
+    ]
+  }
+]
+```
+
+**Implementation:** `core/runtime/mcp/mcp.go:93-138`
+
+**Search Algorithm:** Uses hybrid scoring with:
+- Token coverage (exact/partial matching)
+- N-gram similarity (Jaccard index)
+- Field-weighted scoring (name: 30%, statement: 25%, input names: 18%)
+- Substring boosting for exact matches
+
+**Source:** `core/runtime/mcp/search_index.go:123-150`
+
+### 2. execute
+
+Execute a tool by name with structured inputs.
+
+**Input Schema:**
+```json
+{
+  "type": "object",
+  "properties": {
+    "tool": {
+      "type": "string",
+      "description": "Name of the target tool to execute."
+    },
+    "inputs": {
+      "type": "object",
+      "description": "Structured inputs for the target tool."
+    }
+  },
+  "required": ["tool", "inputs"]
+}
+```
+
+**Example Request:**
+```json
+{
+  "name": "execute",
+  "arguments": {
+    "tool": "get_user",
+    "inputs": {
+      "user_id": "123"
+    }
+  }
+}
+```
+
+**Example Response:**
+```json
+[
+  {
+    "id": "123",
+    "name": "John Doe",
+    "email": "john@example.com"
+  }
+]
+```
+
+**Implementation:** `core/runtime/mcp/mcp.go:140-198`
+
+## Authentication Flow
+
+The execute tool preserves HTTP headers for tool-level authentication:
+
+```go
+// Extract headers from MCP request metadata
+if extra := req.GetExtra(); extra != nil && extra.Header != nil {
+    ctx = framework.WithRequestHeaders(ctx, extra.Header)
+}
+```
+
+**Source:** `core/runtime/mcp/mcp.go:145-147`
+
+This allows tools to access `Authorization` headers via the framework's auth context.
+
+## CORS Configuration
+
+The `/mcp` endpoint includes CORS headers for browser-based clients:
+
+```go
+Access-Control-Allow-Origin: *
+Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS
+Access-Control-Allow-Headers: Content-Type, Accept, MCP-Protocol-Version, Mcp-Session-Id, Last-Event-ID
+Access-Control-Expose-Headers: Mcp-Session-Id
+```
+
+**Implementation:** `core/runtime/server/server.go:332-346`
+
+## Error Handling
+
+Errors are returned as MCP error responses with JSON-RPC error codes:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"error\":\"tool 'invalid_tool' not found\",\"code\":-32603}"
+      }
+    ],
+    "isError": true
+  }
+}
+```
+
+**Error Codes:**
+- `-32600`: Invalid Request
+- `-32602`: Invalid Params (missing/malformed arguments)
+- `-32603`: Internal Error (execution failure)
+
+**Implementation:** `core/runtime/mcp/mcp.go:238-254`
+
+## Configuration
+
+Search result limit can be configured in `hyperterse.yml`:
+
+```yaml
+tool_defaults:
+  search:
+    limit: 20  # Default: 10
+```
+
+**Source:** `core/runtime/mcp/mcp.go:256-265`
+
+## Session Management
+
+Streamable HTTP transport maintains sessions via:
+
+1. **Session ID Header**: `Mcp-Session-Id` returned after initialization
+2. **Session Reuse**: Clients send session ID to reuse existing connections
+3. **SSE Reconnection**: `Last-Event-ID` header for event stream recovery
+
+**SDK Implementation:** `github.com/modelcontextprotocol/go-sdk v1.3.0`
+
+## Performance
+
+The MCP adapter is stateless and delegates to the executor, inheriting:
+
+- Request-scoped context cancellation
+- Connection pooling from database connectors
+- In-memory result caching (see [Caching](/runtime/caching))
+- Distributed tracing spans (see [Observability](/runtime/observability))
+
+**Server Configuration:**
+```go
+ReadTimeout:  15 * time.Second
+WriteTimeout: 0  // Unlimited for SSE
+IdleTimeout:  60 * time.Second
+```
+
+**Source:** `core/runtime/server/server.go:127-131`

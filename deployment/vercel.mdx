@@ -1,0 +1,365 @@
+---
+title: Vercel Deployment
+description: Deployment options and limitations for Vercel
+---
+
+Learn about deploying Hyperterse on Vercel and understand platform limitations.
+
+## Important Limitations
+
+<Warning>
+  **Hyperterse is NOT compatible with Vercel's standard deployment model.**
+  
+  Hyperterse requires a **long-running HTTP server** with persistent connections for MCP streaming. Vercel is optimized for:
+  - Serverless functions (max 60s execution time on Pro, 10s on Hobby)
+  - Edge runtime (extremely short-lived)
+  - Static site generation and client-side rendering
+  
+  These architectural constraints make Vercel unsuitable for Hyperterse in production.
+</Warning>
+
+## Why Vercel Doesn't Work
+
+Vercel's platform has fundamental limitations that conflict with Hyperterse requirements:
+
+| Requirement | Hyperterse Needs | Vercel Provides |
+|-------------|------------------|------------------|
+| **Process Model** | Long-running server | Serverless functions |
+| **HTTP Connections** | Persistent connections | Request/response only |
+| **Execution Time** | Unlimited | 10s (Hobby) / 60s (Pro) |
+| **WebSocket Support** | Required for MCP | Not available |
+| **State** | In-memory caching | Stateless execution |
+| **Database Connections** | Connection pooling | Per-request connections |
+
+## Vercel Serverless Functions: Not Suitable
+
+Vercel Serverless Functions:
+- **Timeout**: 10 seconds (Hobby), 60 seconds (Pro), 300 seconds (Enterprise)
+- **No persistent connections**: Functions are stateless
+- **Cold starts**: High latency on first request
+- **Memory limits**: 1 GB (Hobby), 3 GB (Pro)
+
+Hyperterse needs:
+- ✅ Unlimited execution time
+- ✅ Persistent HTTP connections
+- ✅ Low-latency responses
+- ✅ Stateful in-memory caching
+
+**Verdict**: ❌ Incompatible
+
+## Vercel Edge Functions: Even Less Suitable
+
+Vercel Edge Functions:
+- **Timeout**: 25 seconds
+- **No Node.js APIs**: Limited runtime environment
+- **No database connections**: Can't connect to PostgreSQL/MySQL directly
+- **Smaller payload limits**: 4 MB request/response
+
+**Verdict**: ❌ Completely incompatible
+
+## Could You Hack It To Work?
+
+Technically, you could try to:
+
+1. **Split each MCP request into a new serverless function invocation**
+   - ❌ Adds massive latency
+   - ❌ No connection pooling
+   - ❌ Can't handle streaming responses
+   - ❌ Will timeout on long-running operations
+
+2. **Use Vercel functions as a proxy to external Hyperterse server**
+   - ⚠️ Works, but defeats the purpose of using Vercel
+   - ⚠️ Adds extra latency
+   - ⚠️ Still subject to Vercel timeout limits
+   - ✅ Better to use a dedicated platform
+
+## Recommended Alternatives
+
+If you're a Vercel user, deploy Hyperterse to a compatible platform and use Vercel for your frontend:
+
+### Architecture: Vercel Frontend + Separate Backend
+
+```
+┌──────────────────┐
+│  Vercel Frontend │
+│  (Next.js, etc.) │
+└────────┬─────────┘
+         │
+         │ API Calls
+         │
+         ▼
+┌────────────────────┐
+│  Hyperterse Server │
+│  (Railway/Cloud    │
+│   Run/AWS ECS)     │
+└────────┬───────────┘
+         │
+         ▼
+┌────────────────────┐
+│   Database / APIs  │
+└────────────────────┘
+```
+
+<Steps>
+  <Step title="Deploy Hyperterse to compatible platform">
+    Choose from:
+    - [Railway](/deployment/railway) - Easiest setup
+    - [Google Cloud Run](/deployment/gcp) - Serverless containers
+    - [AWS ECS](/deployment/aws) - Enterprise-grade
+    - [DigitalOcean App Platform](/deployment/digital-ocean) - Affordable
+  </Step>
+  
+  <Step title="Deploy your frontend to Vercel">
+    ```bash
+    # In your frontend repo
+    vercel deploy
+    ```
+  </Step>
+  
+  <Step title="Configure environment variables">
+    Set `HYPERTERSE_API_URL` in Vercel:
+    
+    ```bash
+    vercel env add HYPERTERSE_API_URL
+    # Enter: https://your-hyperterse-server.com
+    ```
+  </Step>
+  
+  <Step title="Make API calls from frontend">
+    ```typescript
+    // In your Next.js app
+    const response = await fetch(`${process.env.HYPERTERSE_API_URL}/mcp`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'tools/list',
+        id: 1
+      })
+    });
+    ```
+  </Step>
+</Steps>
+
+## Using Vercel with External Hyperterse
+
+### Example: Next.js App Calling Hyperterse
+
+Create `app/api/mcp/route.ts` (Next.js 13+ App Router):
+
+```typescript
+import { NextRequest, NextResponse } from 'next/server';
+
+export async function POST(request: NextRequest) {
+  try {
+    const body = await request.json();
+    
+    // Proxy to your Hyperterse server
+    const response = await fetch(`${process.env.HYPERTERSE_API_URL}/mcp`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+    
+    if (!response.ok) {
+      throw new Error(`Hyperterse API error: ${response.statusText}`);
+    }
+    
+    const data = await response.json();
+    return NextResponse.json(data);
+  } catch (error) {
+    console.error('MCP proxy error:', error);
+    return NextResponse.json(
+      { error: 'Failed to communicate with MCP server' },
+      { status: 500 }
+    );
+  }
+}
+```
+
+Call from client:
+
+```typescript
+// app/components/ToolsList.tsx
+'use client';
+
+import { useEffect, useState } from 'react';
+
+export function ToolsList() {
+  const [tools, setTools] = useState([]);
+  
+  useEffect(() => {
+    async function fetchTools() {
+      const response = await fetch('/api/mcp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          method: 'tools/list',
+          id: 1
+        })
+      });
+      
+      const data = await response.json();
+      setTools(data.result.tools);
+    }
+    
+    fetchTools();
+  }, []);
+  
+  return (
+    <div>
+      {tools.map(tool => (
+        <div key={tool.name}>{tool.name}</div>
+      ))}
+    </div>
+  );
+}
+```
+
+## Comparison: Vercel vs. Better Options
+
+| Platform | Hyperterse Support | Frontend Support | Cost | Best For |
+|----------|-------------------|------------------|------|----------|
+| **Vercel** | ❌ Not suitable | ✅ Excellent | Low-Medium | Frontend only |
+| **Railway** | ✅ Perfect | ⚠️ Basic | Low-Medium | Full-stack |
+| **Cloud Run** | ✅ Perfect | ⚠️ Basic | Low-Medium | Backend |
+| **Fly.io** | ✅ Perfect | ✅ Good | Low-Medium | Full-stack |
+| **Vercel + Railway** | ✅ Best of both | ✅ Best | Medium | Production |
+
+## Recommended Architecture for Vercel Users
+
+### Option 1: Vercel Frontend + Railway Backend (Easiest)
+
+```yaml
+# railway.json (in Hyperterse repo)
+{
+  "build": {
+    "builder": "DOCKERFILE"
+  },
+  "deploy": {
+    "startCommand": "./hyperterse serve",
+    "healthcheckPath": "/heartbeat"
+  }
+}
+```
+
+Deploy:
+
+```bash
+# Backend: Deploy to Railway
+railway init
+railway up
+
+# Frontend: Deploy to Vercel
+vercel deploy
+```
+
+### Option 2: Vercel Frontend + Cloud Run Backend (Scalable)
+
+```bash
+# Backend: Deploy to Cloud Run
+gcloud run deploy hyperterse \
+  --image gcr.io/PROJECT_ID/hyperterse \
+  --region us-central1 \
+  --allow-unauthenticated
+
+# Frontend: Deploy to Vercel
+vercel deploy
+```
+
+### Option 3: Monorepo with Turborepo
+
+Structure your project:
+
+```
+my-monorepo/
+  apps/
+    web/              # Next.js app (deploys to Vercel)
+    api/              # Hyperterse server (deploys to Railway)
+  packages/
+    shared-types/     # Shared TypeScript types
+  turbo.json
+  package.json
+```
+
+Configure `vercel.json` in `apps/web/`:
+
+```json
+{
+  "buildCommand": "cd ../.. && npx turbo run build --filter=web",
+  "outputDirectory": ".next",
+  "env": {
+    "HYPERTERSE_API_URL": "https://your-hyperterse.railway.app"
+  }
+}
+```
+
+## CORS Configuration
+
+If calling Hyperterse from Vercel frontend, enable CORS:
+
+```yaml
+# In your .hyperterse config
+server:
+  port: 8080
+  cors:
+    allowed_origins:
+      - "https://your-app.vercel.app"
+      - "https://*.vercel.app"  # For preview deployments
+    allowed_methods:
+      - GET
+      - POST
+      - OPTIONS
+    allowed_headers:
+      - Content-Type
+      - Authorization
+```
+
+<Note>
+  Hyperterse doesn't have built-in CORS configuration yet. Use a reverse proxy like nginx or handle CORS in your frontend proxy route.
+</Note>
+
+## Summary
+
+<CardGroup cols={2}>
+  <Card title="Use Vercel For" icon="check">
+    - Next.js, React, Vue frontends
+    - Static site generation
+    - Edge-optimized content delivery
+    - API routes (as proxy only)
+  </Card>
+  
+  <Card title="Don't Use Vercel For" icon="xmark">
+    - Running Hyperterse server
+    - Long-running processes
+    - Persistent connections
+    - WebSocket servers
+    - Database connection pooling
+  </Card>
+</CardGroup>
+
+## Best Practice: Separation of Concerns
+
+✅ **Recommended Setup:**
+- **Vercel**: Frontend (Next.js, React, etc.)
+- **Railway/Cloud Run**: Hyperterse backend
+- **Database**: Managed service (Neon, Supabase, PlanetScale)
+
+❌ **Not Recommended:**
+- Trying to run Hyperterse on Vercel serverless functions
+- Using Vercel Edge Functions for MCP
+- Hacking around timeout limits
+
+## Next Steps
+
+Deploy Hyperterse to a compatible platform:
+
+- [Railway](/deployment/railway) - Best for Vercel users (easy setup)
+- [Google Cloud Run](/deployment/gcp) - Serverless containers
+- [AWS ECS](/deployment/aws) - Enterprise deployments
+- [DigitalOcean](/deployment/digital-ocean) - Simple and affordable
+
+Then connect your Vercel frontend to your Hyperterse backend using the examples above.

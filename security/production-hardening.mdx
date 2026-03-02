@@ -1,0 +1,646 @@
+---
+title: 'Production Hardening'
+description: 'Security best practices for deploying Hyperterse in production environments'
+---
+
+## Overview
+
+Running Hyperterse in production requires careful attention to authentication, network security, secrets management, and observability. This guide covers essential hardening steps.
+
+## Authentication
+
+Hyperterse provides per-tool authentication through a pluggable auth system (`core/framework/auth.go`).
+
+### Built-in Auth Plugins
+
+Two plugins are available out of the box:
+
+#### 1. `allow_all` (Development Only)
+
+<Warning>
+  **Never use `allow_all` in production**. This plugin permits all requests without authentication.
+</Warning>
+
+```yaml
+# Development only!
+auth:
+  plugin: allow_all
+```
+
+#### 2. `api_key` (Production)
+
+Validates requests against an API key in the `X-API-Key` header (`core/framework/auth.go:102-118`):
+
+```yaml
+auth:
+  plugin: api_key
+  policy:
+    value: "${env.HYPERTERSE_API_KEY}"
+```
+
+Implementation:
+```go
+func (apiKeyPlugin) Authorize(_ context.Context, req AuthRequest) error {
+    provided := strings.TrimSpace(req.Header.Get("X-API-Key"))
+    expected := strings.TrimSpace(req.Policy["value"])
+    if expected == "" {
+        expected = strings.TrimSpace(os.Getenv("HYPERTERSE_API_KEY"))
+    }
+    if expected == "" {
+        return fmt.Errorf("api_key plugin is configured but no expected key is set")
+    }
+    if provided == "" || provided != expected {
+        return fmt.Errorf("unauthorized: invalid api key")
+    }
+    return nil
+}
+```
+
+### Configuring API Key Authentication
+
+#### Step 1: Set Environment Variable
+
+```bash
+export HYPERTERSE_API_KEY="your-secure-random-key-here"
+```
+
+Generate a strong key:
+```bash
+openssl rand -hex 32
+```
+
+#### Step 2: Configure Tools
+
+Add auth to each tool in your `app/tools/*/config.terse`:
+
+```yaml
+description: "Get user by id"
+use: my-database
+statement: |
+  SELECT * FROM users WHERE id = {{ inputs.user_id }}
+inputs:
+  user_id:
+    type: int
+auth:
+  plugin: api_key
+```
+
+#### Step 3: Make Authenticated Requests
+
+```bash
+curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-secure-random-key-here" \
+  -d '{
+    "jsonrpc": "2.0",
+    "method": "tools/call",
+    "params": {
+      "name": "get-user",
+      "arguments": { "user_id": 123 }
+    },
+    "id": 1
+  }'
+```
+
+### Per-Tool Authentication
+
+<Info>
+  Each tool can have its own auth configuration. This enables fine-grained access control.
+</Info>
+
+```yaml
+# Public tool - no auth
+- name: health-check
+  description: "Check system health"
+  handler: "./health.ts"
+  auth:
+    plugin: allow_all
+
+# Protected tool - requires API key
+- name: get-user
+  description: "Get user data"
+  use: database
+  statement: "SELECT * FROM users WHERE id = {{ inputs.id }}"
+  inputs:
+    id: { type: int }
+  auth:
+    plugin: api_key
+```
+
+### Custom Auth Plugins
+
+For advanced authentication (OAuth, JWT, mTLS), implement a custom plugin:
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "strings"
+    "github.com/hyperterse/hyperterse/core/framework"
+)
+
+type jwtAuthPlugin struct{}
+
+func (jwtAuthPlugin) Name() string { return "jwt" }
+
+func (jwtAuthPlugin) Authorize(ctx context.Context, req framework.AuthRequest) error {
+    authHeader := req.Header.Get("Authorization")
+    if !strings.HasPrefix(authHeader, "Bearer ") {
+        return fmt.Errorf("missing or invalid authorization header")
+    }
+    
+    token := strings.TrimPrefix(authHeader, "Bearer ")
+    
+    // Validate JWT token (use a proper JWT library)
+    if !validateJWT(token, req.Policy["secret"]) {
+        return fmt.Errorf("invalid or expired token")
+    }
+    
+    return nil
+}
+
+func init() {
+    framework.RegisterAuthPlugin(jwtAuthPlugin{})
+}
+```
+
+Register during initialization (`core/framework/auth.go:52-55`).
+
+## API Key Management
+
+### Generation
+
+Generate cryptographically secure API keys:
+
+```bash
+# 256-bit key (recommended)
+openssl rand -hex 32
+
+# Or use uuidgen for compatibility
+uuidgen
+```
+
+### Storage
+
+<Warning>
+  **Never commit API keys to version control**. Always use environment variables or secrets managers.
+</Warning>
+
+#### Local Development
+
+Use `.env` files (auto-loaded by Hyperterse):
+
+```bash
+# .env.local (gitignored)
+HYPERTERSE_API_KEY=a1b2c3d4e5f6...
+DATABASE_URL=postgresql://...
+```
+
+#### Production Deployment
+
+Use your platform's secrets manager:
+
+```bash
+# Kubernetes Secret
+kubectl create secret generic hyperterse-secrets \
+  --from-literal=api-key=a1b2c3d4e5f6...
+
+# Docker Compose
+docker-compose run -e HYPERTERSE_API_KEY=a1b2c3d4e5f6... hyperterse
+
+# AWS ECS
+# Use AWS Secrets Manager or Parameter Store
+
+# Fly.io
+flyctl secrets set HYPERTERSE_API_KEY=a1b2c3d4e5f6...
+```
+
+### Rotation
+
+Rotate API keys regularly:
+
+1. Generate new key
+2. Deploy with new `HYPERTERSE_API_KEY`
+3. Update clients gradually
+4. Monitor for unauthorized requests
+5. Remove old key after transition
+
+### Multiple Keys (Future)
+
+For multiple client support, implement a custom auth plugin with key lookup:
+
+```go
+func (p multiKeyPlugin) Authorize(ctx context.Context, req framework.AuthRequest) error {
+    provided := req.Header.Get("X-API-Key")
+    
+    // Check against multiple keys from database/cache
+    validKeys := p.loadValidKeys(ctx)
+    for _, key := range validKeys {
+        if provided == key {
+            return nil
+        }
+    }
+    
+    return fmt.Errorf("unauthorized")
+}
+```
+
+## Rate Limiting
+
+<Info>
+  Hyperterse does not include built-in rate limiting. Use a reverse proxy or API gateway for production deployments.
+</Info>
+
+### Nginx Rate Limiting
+
+```nginx
+http {
+    # Define rate limit zone: 10 requests per second per IP
+    limit_req_zone $binary_remote_addr zone=hyperterse:10m rate=10r/s;
+    
+    server {
+        listen 443 ssl;
+        server_name api.yourdomain.com;
+        
+        # SSL configuration (see next section)
+        
+        location /mcp {
+            # Apply rate limit with burst allowance
+            limit_req zone=hyperterse burst=20 nodelay;
+            
+            # Proxy to Hyperterse
+            proxy_pass http://localhost:8080;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+    }
+}
+```
+
+### Cloudflare Rate Limiting
+
+Use Cloudflare's Rate Limiting Rules:
+
+1. Navigate to Security > WAF > Rate limiting rules
+2. Create rule:
+   - **If**: Incoming requests match URI path `/mcp`
+   - **Then**: Apply rate limit of 100 requests per minute per IP
+   - **Action**: Block with 429 Too Many Requests
+
+### API Gateway Rate Limiting
+
+For AWS API Gateway, Google Cloud Endpoints, or Azure API Management:
+
+- Configure throttling policies at the API level
+- Set burst limits and sustained rate limits
+- Monitor metrics for abuse patterns
+
+## TLS/HTTPS Configuration
+
+<Warning>
+  **Never expose Hyperterse directly to the internet without TLS**. Always use HTTPS in production.
+</Warning>
+
+Hyperterse serves HTTP on `localhost:8080` by default. Use a reverse proxy for TLS termination.
+
+### Nginx with Let's Encrypt
+
+```nginx
+server {
+    listen 80;
+    server_name api.yourdomain.com;
+    
+    # Redirect HTTP to HTTPS
+    return 301 https://$server_name$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name api.yourdomain.com;
+    
+    # Let's Encrypt certificates
+    ssl_certificate /etc/letsencrypt/live/api.yourdomain.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/api.yourdomain.com/privkey.pem;
+    
+    # Modern TLS configuration
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers 'ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256';
+    ssl_prefer_server_ciphers off;
+    
+    # HSTS header
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+    
+    location / {
+        proxy_pass http://localhost:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+}
+```
+
+### Caddy (Automatic HTTPS)
+
+Caddy automatically provisions Let's Encrypt certificates:
+
+```caddyfile
+api.yourdomain.com {
+    reverse_proxy localhost:8080
+    
+    # Optional: require client authentication
+    tls {
+        client_auth {
+            mode require_and_verify
+            trusted_ca_cert_file /path/to/client-ca.pem
+        }
+    }
+}
+```
+
+### Docker with Traefik
+
+```yaml
+version: '3.8'
+
+services:
+  traefik:
+    image: traefik:v2.10
+    command:
+      - "--providers.docker=true"
+      - "--entrypoints.websecure.address=:443"
+      - "--certificatesresolvers.letsencrypt.acme.tlschallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.email=admin@yourdomain.com"
+    ports:
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./acme.json:/acme.json
+  
+  hyperterse:
+    image: hyperterse/hyperterse:latest
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.hyperterse.rule=Host(`api.yourdomain.com`)"
+      - "traefik.http.routers.hyperterse.entrypoints=websecure"
+      - "traefik.http.routers.hyperterse.tls.certresolver=letsencrypt"
+    environment:
+      - HYPERTERSE_API_KEY=${HYPERTERSE_API_KEY}
+```
+
+## Environment Variable Security
+
+### Secrets in Configuration
+
+Use environment variable substitution for all secrets (`README.md:163-165`):
+
+```yaml
+# .hyperterse
+name: my-project
+
+# app/adapters/database.terse
+connector: postgres
+connection_string: "${env.DATABASE_URL}"
+
+# app/tools/get-user/config.terse
+auth:
+  plugin: api_key
+  policy:
+    value: "${env.HYPERTERSE_API_KEY}"
+```
+
+<Warning>
+  Environment variables are substituted at runtime and **never** included in build artifacts. This prevents accidental exposure.
+</Warning>
+
+### Preventing Secret Leakage
+
+#### 1. .gitignore Sensitive Files
+
+```gitignore
+# Environment files
+.env
+.env.local
+.env.*.local
+.env.production
+
+# Build artifacts (may contain runtime config)
+dist/
+*.artifact
+
+# Database files
+*.db
+*.sqlite
+
+# Logs (may contain sensitive data)
+*.log
+logs/
+```
+
+#### 2. Use Separate Configs per Environment
+
+```bash
+# Development
+cp .env.example .env.local
+# Edit .env.local with dev credentials
+
+# Production
+# Set environment variables in deployment platform
+```
+
+#### 3. Audit Build Outputs
+
+Before deploying, verify no secrets in build:
+
+```bash
+hyperterse build -o dist/
+grep -r "password\|secret\|key" dist/
+```
+
+Expect: no matches (environment variables substituted at runtime, not build time).
+
+## Database Security
+
+### Connection Strings
+
+Always use environment variables:
+
+```yaml
+# app/adapters/main-db.terse
+connector: postgres
+connection_string: "${env.DATABASE_URL}"
+options:
+  sslmode: require
+  connect_timeout: 10
+```
+
+### SSL/TLS for Database Connections
+
+#### PostgreSQL
+
+```bash
+DATABASE_URL="postgresql://user:pass@host:5432/db?sslmode=require"
+```
+
+Options:
+- `sslmode=disable` - No SSL (development only)
+- `sslmode=require` - Require SSL but don't verify certificate
+- `sslmode=verify-ca` - Verify CA certificate
+- `sslmode=verify-full` - Verify CA and hostname
+
+#### MySQL
+
+```bash
+DATABASE_URL="mysql://user:pass@host:3306/db?tls=true"
+```
+
+#### MongoDB
+
+```bash
+DATABASE_URL="mongodb://user:pass@host:27017/db?ssl=true"
+```
+
+### Least Privilege Principle
+
+<Warning>
+  Create database users with minimal required permissions. Never use admin/root credentials.
+</Warning>
+
+```sql
+-- PostgreSQL: Create read-only user for query tools
+CREATE USER hyperterse_readonly WITH PASSWORD 'secure-password';
+GRANT CONNECT ON DATABASE mydb TO hyperterse_readonly;
+GRANT USAGE ON SCHEMA public TO hyperterse_readonly;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO hyperterse_readonly;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO hyperterse_readonly;
+
+-- For tools that need write access, grant specific permissions
+CREATE USER hyperterse_writer WITH PASSWORD 'secure-password';
+GRANT SELECT, INSERT, UPDATE ON specific_table TO hyperterse_writer;
+```
+
+## Network Security
+
+### Firewall Rules
+
+Restrict access to Hyperterse port:
+
+```bash
+# UFW (Ubuntu)
+sudo ufw allow from 10.0.0.0/8 to any port 8080 proto tcp
+sudo ufw deny 8080/tcp
+
+# iptables
+iptables -A INPUT -p tcp --dport 8080 -s 10.0.0.0/8 -j ACCEPT
+iptables -A INPUT -p tcp --dport 8080 -j DROP
+```
+
+### VPC/Private Networks
+
+Deploy Hyperterse in a private subnet:
+
+- **Public subnet**: Load balancer with TLS termination
+- **Private subnet**: Hyperterse instances (no public IP)
+- **Database subnet**: Isolated database layer
+
+```
+┌─────────────────────────────────────┐
+│         Public Subnet               │
+│  ┌─────────────────────────────┐    │
+│  │  Load Balancer (HTTPS)      │    │
+│  └────────────┬────────────────┘    │
+└───────────────┼─────────────────────┘
+                │
+┌───────────────┼─────────────────────┐
+│         Private Subnet              │
+│  ┌────────────▼────────────────┐    │
+│  │  Hyperterse (HTTP :8080)    │    │
+│  └────────────┬────────────────┘    │
+└───────────────┼─────────────────────┘
+                │
+┌───────────────┼─────────────────────┐
+│         Database Subnet             │
+│  ┌────────────▼────────────────┐    │
+│  │  PostgreSQL (:5432)         │    │
+│  └─────────────────────────────┘    │
+└─────────────────────────────────────┘
+```
+
+## Monitoring and Observability
+
+Hyperterse includes OpenTelemetry support for production monitoring.
+
+### Health Checks
+
+Use the heartbeat endpoint:
+
+```bash
+curl http://localhost:8080/heartbeat
+```
+
+Configure liveness/readiness probes:
+
+```yaml
+# Kubernetes
+livenessProbe:
+  httpGet:
+    path: /heartbeat
+    port: 8080
+  initialDelaySeconds: 10
+  periodSeconds: 30
+
+readinessProbe:
+  httpGet:
+    path: /heartbeat
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 10
+```
+
+### Structured Logging
+
+Enable verbose logging for security auditing:
+
+```bash
+hyperterse start --verbose
+```
+
+Log all authentication failures, input validation errors, and unusual patterns.
+
+### Alert on Anomalies
+
+Monitor for:
+- High rate of 401/403 errors (brute force attempts)
+- Input validation failures (injection attempts)
+- Unusual query patterns
+- Database connection failures
+- High latency or timeouts
+
+## Security Checklist
+
+<Check>
+  **Production Deployment Checklist**:
+  - [ ] All tools use `api_key` or custom auth (no `allow_all`)
+  - [ ] API keys stored in environment variables, not config files
+  - [ ] TLS/HTTPS enabled via reverse proxy
+  - [ ] Database connections use SSL/TLS
+  - [ ] Database users follow least privilege principle
+  - [ ] Rate limiting configured at proxy/gateway level
+  - [ ] Firewall rules restrict access to necessary IPs
+  - [ ] String inputs validated with input mappers
+  - [ ] `.env` files in `.gitignore`
+  - [ ] Health checks configured
+  - [ ] Monitoring and alerting active
+  - [ ] Secrets rotation schedule established
+  - [ ] Security audit logs enabled
+</Check>
+
+## Additional Resources
+
+- [Input Validation & SQL Injection Prevention](/security/input-safety)
+- [MCP Protocol Security](https://modelcontextprotocol.io/docs/security)
+- [OWASP Top 10](https://owasp.org/www-project-top-ten/)

@@ -1,0 +1,165 @@
+---
+title: Introduction
+description: Hyperterse is the declarative framework for building performant MCP servers. Turn tool configs into callable tools with filesystem-based discovery, pluggable adapters, and embedded scripting.
+---
+
+# Introduction to Hyperterse
+
+Hyperterse turns tool configs into callable tools, with filesystem-based tool discovery, pluggable adapters (Postgres, MySQL, MongoDB, Redis), optional scripts for transforms and handlers, and MCP runtime exposure over Streamable HTTP.
+
+## What is Hyperterse?
+
+Hyperterse is a **tool-first MCP framework** where each tool config compiles into a callable tool. It provides:
+
+- **Declarative runtime**: Root config + adapter files + tool files define your entire server
+- **Extensible execution pipeline**: Auth → input transform → execute → output transform
+- **Embedded scripting**: Script hooks run in a sandboxed runtime, bundled at compile time
+- **Production-ready**: Build deployable artifacts with everything needed to run
+
+## Key features
+
+<CardGroup cols={2}>
+  <Card title="Filesystem-based discovery" icon="folder-tree">
+    Tools are automatically discovered from your `app/tools/` directory. Each tool folder contains a `config.terse` file that defines the tool's behavior.
+  </Card>
+  
+  <Card title="Declarative configuration" icon="file-code">
+    Define tools, adapters, and server settings using simple YAML-like `.terse` config files. No boilerplate code required.
+  </Card>
+  
+  <Card title="Database adapters" icon="database">
+    Built-in support for Postgres, MySQL, MongoDB, and Redis. Connect your data sources with simple config files.
+  </Card>
+  
+  <Card title="Embedded scripting" icon="code">
+    Add custom logic with TypeScript handlers for input validation, output transformation, or complete custom implementations.
+  </Card>
+  
+  <Card title="Authentication plugins" icon="shield-check">
+    Extensible auth system with built-in plugins. Each tool can specify its own authentication requirements.
+  </Card>
+  
+  <Card title="MCP transport" icon="arrows-left-right">
+    Expose your tools over Streamable HTTP with the Model Context Protocol. Ready for AI agent integration.
+  </Card>
+</CardGroup>
+
+## Example: Database-backed tool
+
+Here's a real tool from the Hyperterse demo that fetches user data from Postgres:
+
+```yaml app/tools/get-user/config.terse
+description: "Get user by id, with input validation and response mapping."
+use: my-adapter
+statement: |
+  SELECT * FROM users WHERE id = {{ inputs.userId }}
+inputs:
+  userId:
+    type: int
+    description: "User ID to fetch."
+mappers:
+  input: "./user-input-validator.ts"
+  output: "./user-data-mapper.ts"
+auth:
+  plugin: allow_all
+```
+
+With optional input validation:
+
+```typescript app/tools/get-user/user-input-validator.ts
+export default async function inputTransform(payload: { inputs?: Record<string, unknown> }) {
+  const inputs = payload?.inputs ?? {};
+  const rawUserId = inputs.userId;
+
+  if (rawUserId === undefined || rawUserId === null) {
+    throw new Error("user_id is required");
+  }
+
+  const userId = Number(rawUserId);
+  if (!Number.isFinite(userId) || userId <= 0 || !Number.isInteger(userId)) {
+    throw new Error("user_id must be a positive integer");
+  }
+
+  return {
+    ...inputs,
+    userId,
+  };
+}
+```
+
+And output transformation:
+
+```typescript app/tools/get-user/user-data-mapper.ts
+import dayjs from "dayjs";
+import { v4 as uuidv4 } from "uuid";
+
+type Row = Record<string, unknown>;
+
+export default async function outputTransform(payload: { results?: Row[] }) {
+  const rows = payload?.results ?? [];
+  return rows.map((row) => ({
+    trace_id: uuidv4(),
+    id: row.id,
+    name: row.name,
+    email: row.email,
+    created_at_iso: row.created_at ? dayjs(String(row.created_at)).toISOString() : null,
+  }));
+}
+```
+
+## Example: Script-backed tool
+
+You can also build tools with pure TypeScript handlers:
+
+```yaml app/tools/get-weather/config.terse
+description: "Custom weather MCP tool implemented entirely in TypeScript handler."
+handler: "./weather-handler.ts"
+auth:
+  plugin: allow_all
+```
+
+```typescript app/tools/get-weather/weather-handler.ts
+import dayjs from "dayjs";
+
+type Inputs = {
+  city?: string;
+  units?: "metric" | "imperial";
+};
+
+export default async function handler(payload: { inputs?: Inputs; route?: string }) {
+  const city = payload?.inputs?.city ?? "Bengaluru";
+  const units = payload?.inputs?.units ?? "metric";
+
+  const sampleTemp = units === "imperial" ? 77 : 25;
+  const sampleWind = units === "imperial" ? "8 mph" : "13 km/h";
+
+  return [
+    {
+      city,
+      units,
+      observed_at: dayjs().toISOString(),
+      weather: "Partly cloudy",
+      temperature: sampleTemp,
+      wind: sampleWind,
+      source: "demo-handler",
+      route: payload?.route ?? "unknown"
+    }
+  ];
+}
+```
+
+<Tip>
+Script-backed tools give you complete control over execution logic, making them perfect for API integrations, complex business logic, or any custom functionality.
+</Tip>
+
+## Get started
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Install Hyperterse and verify your setup
+  </Card>
+  
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Build your first MCP server in minutes
+  </Card>
+</CardGroup>

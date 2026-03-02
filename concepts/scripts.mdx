@@ -1,0 +1,519 @@
+---
+title: TypeScript Scripts
+description: Write handlers, input transforms, and output transforms using TypeScript with full npm dependency support
+---
+
+Hyperterse allows you to write TypeScript scripts for custom tool logic, input validation, and output transformation. Scripts are bundled at build time and executed in-process using a JavaScript runtime.
+
+## Script Types
+
+Hyperterse supports three types of scripts:
+
+<CardGroup cols={3}>
+  <Card title="Handlers" icon="code">
+    Custom tool implementation logic
+    
+    Replaces database execution entirely
+  </Card>
+  <Card title="Input Transforms" icon="arrow-right-to-bracket">
+    Validate and transform inputs
+    
+    Runs before execution
+  </Card>
+  <Card title="Output Transforms" icon="arrow-right-from-bracket">
+    Reshape database results
+    
+    Runs after execution
+  </Card>
+</CardGroup>
+
+## Script Runtime
+
+Scripts execute in a **Goja JavaScript runtime** (`core/framework/js_runtime.go`) embedded in the Go server:
+
+- **In-process execution** — No separate Node.js process required
+- **Context propagation** — Inherits timeout/cancellation from HTTP requests
+- **Built-in APIs** — `fetch()` and `console.log()` available
+- **npm dependencies** — Bundled into a shared vendor bundle
+
+### Runtime Globals
+
+Scripts have access to:
+
+```typescript
+// HTTP client (30-second timeout)
+await fetch('https://api.example.com/data', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ key: 'value' })
+});
+
+// Logging
+console.log('Processing user:', userId);
+console.error('Validation failed:', error);
+console.debug('Debug info:', metadata);
+```
+
+<Note>
+The `fetch` implementation uses Go's `net/http` client with automatic timeout propagation from the request context.
+</Note>
+
+## Handler Scripts
+
+Handlers implement the entire tool logic for **script-backed tools** (tools without a `use` adapter binding).
+
+### Handler Function Signature
+
+```typescript
+type HandlerPayload = {
+  inputs?: Record<string, any>;
+  route?: string;
+};
+
+export default async function handler(payload: HandlerPayload): Promise<any[]> {
+  // Your implementation
+  return [{ result: 'data' }];
+}
+```
+
+**Parameters:**
+- `payload.inputs` — User-provided input values (after validation)
+- `payload.route` — Optional routing information
+
+**Return value:**
+- Array of objects representing result rows
+- Single object (auto-wrapped in array)
+- Primitive value (wrapped as `{ "value": ... }`)
+
+### Real Example: Weather Handler
+
+From `demo/app/tools/get-weather/weather-handler.ts`:
+
+```typescript
+import dayjs from "dayjs";
+
+type Inputs = {
+  city?: string;
+  units?: "metric" | "imperial";
+};
+
+export default async function handler(payload: { inputs?: Inputs; route?: string }) {
+  const city = payload?.inputs?.city ?? "Bengaluru";
+  const units = payload?.inputs?.units ?? "metric";
+
+  const sampleTemp = units === "imperial" ? 77 : 25;
+  const sampleWind = units === "imperial" ? "8 mph" : "13 km/h";
+
+  return [
+    {
+      city,
+      units,
+      observed_at: dayjs().toISOString(),
+      weather: "Partly cloudy",
+      temperature: sampleTemp,
+      wind: sampleWind,
+      source: "demo-handler",
+      route: payload?.route ?? "unknown"
+    }
+  ];
+}
+```
+
+### Calling External APIs
+
+Handlers can call external APIs using `fetch`:
+
+```typescript
+export default async function handler(payload: { inputs?: { city?: string } }) {
+  const city = payload?.inputs?.city ?? "London";
+  const apiKey = process.env.WEATHER_API_KEY;
+
+  const response = await fetch(
+    `https://api.weatherapi.com/v1/current.json?key=${apiKey}&q=${city}`
+  );
+
+  if (!response.ok) {
+    throw new Error(`Weather API error: ${response.status}`);
+  }
+
+  const data = await response.json();
+
+  return [
+    {
+      city: data.location.name,
+      temperature: data.current.temp_c,
+      condition: data.current.condition.text,
+      humidity: data.current.humidity,
+      wind_kph: data.current.wind_kph,
+    }
+  ];
+}
+```
+
+<Warning>
+Fetch operations inherit the request timeout from the HTTP context. Long-running API calls may timeout based on client configuration.
+</Warning>
+
+## Input Transform Scripts
+
+Input transforms validate and transform user inputs **before** execution.
+
+### Input Transform Function Signature
+
+```typescript
+type InputTransformPayload = {
+  inputs?: Record<string, unknown>;
+};
+
+export default async function inputTransform(
+  payload: InputTransformPayload
+): Promise<Record<string, any>> {
+  // Validate and transform inputs
+  return transformedInputs;
+}
+```
+
+**Parameters:**
+- `payload.inputs` — Raw input values from the user
+
+**Return value:**
+- Transformed inputs object (replaces original inputs)
+
+**Error handling:**
+- Throw an error to abort execution and return error to caller
+
+### Real Example: User Input Validator
+
+From `demo/app/tools/get-user/user-input-validator.ts`:
+
+```typescript
+export default async function inputTransform(payload: { inputs?: Record<string, unknown> }) {
+  console.log("inputTransform,,,,,", payload);
+  const inputs = payload?.inputs ?? {};
+  const rawUserId = inputs.userId;
+
+  if (rawUserId === undefined || rawUserId === null) {
+    throw new Error("user_id is required");
+  }
+
+  const userId = Number(rawUserId);
+  if (!Number.isFinite(userId) || userId <= 0 || !Number.isInteger(userId)) {
+    throw new Error("user_id must be a positive integer");
+  }
+
+  return {
+    ...inputs,
+    userId,
+  };
+}
+```
+
+### Advanced Validation
+
+```typescript
+import { z } from 'zod';
+
+const userInputSchema = z.object({
+  userId: z.number().int().positive(),
+  includeDeleted: z.boolean().optional().default(false),
+  fields: z.array(z.string()).optional(),
+});
+
+export default async function inputTransform(payload: { inputs?: Record<string, unknown> }) {
+  const inputs = payload?.inputs ?? {};
+
+  // Validate with Zod
+  const result = userInputSchema.safeParse(inputs);
+  
+  if (!result.success) {
+    throw new Error(`Invalid inputs: ${result.error.message}`);
+  }
+
+  // Additional business logic validation
+  if (result.data.userId > 1000000) {
+    throw new Error("User ID out of range");
+  }
+
+  return result.data;
+}
+```
+
+## Output Transform Scripts
+
+Output transforms reshape database results or handler outputs **after** execution.
+
+### Output Transform Function Signature
+
+```typescript
+type OutputTransformPayload = {
+  results?: Array<Record<string, unknown>>;
+};
+
+export default async function outputTransform(
+  payload: OutputTransformPayload
+): Promise<any[]> {
+  // Transform results
+  return transformedResults;
+}
+```
+
+**Parameters:**
+- `payload.results` — Raw database rows or handler output
+
+**Return value:**
+- Transformed results array
+
+### Real Example: User Data Mapper
+
+From `demo/app/tools/get-user/user-data-mapper.ts`:
+
+```typescript
+import dayjs from "dayjs";
+import { v4 as uuidv4 } from "uuid";
+
+type Row = Record<string, unknown>;
+
+export default async function outputTransform(payload: { results?: Row[] }) {
+  const rows = payload?.results ?? [];
+  console.log("outputTransform", rows);
+  return rows.map((row) => ({
+    trace_id: uuidv4(),
+    id: row.id,
+    name: row.name,
+    email: row.email,
+    created_at_iso: row.created_at ? dayjs(String(row.created_at)).toISOString() : null,
+  }));
+}
+```
+
+### Data Aggregation
+
+```typescript
+export default async function outputTransform(payload: { results?: Row[] }) {
+  const rows = payload?.results ?? [];
+
+  // Calculate summary statistics
+  const total = rows.reduce((sum, row) => sum + (Number(row.amount) || 0), 0);
+  const count = rows.length;
+  const average = count > 0 ? total / count : 0;
+
+  return [
+    {
+      summary: {
+        total,
+        count,
+        average,
+        timestamp: new Date().toISOString(),
+      },
+      items: rows.map(row => ({
+        id: row.id,
+        amount: row.amount,
+        formatted_amount: `$${Number(row.amount).toFixed(2)}`,
+      })),
+    }
+  ];
+}
+```
+
+## Script Resolution
+
+Scripts can be referenced in two ways:
+
+### Explicit Reference
+
+```yaml config.terse
+handler: "./weather-handler.ts"
+mappers:
+  input: "./validators.ts#validateUser"
+  output: "./formatters.ts#formatUserData"
+```
+
+**Syntax:** `<path>#<export-name>`
+- `<path>` — Relative to tool directory or project root
+- `<export-name>` — Named export (defaults to `"default"` if omitted)
+
+### Auto-Discovery (Convention)
+
+Hyperterse auto-discovers scripts based on filenames (`core/framework/compiler.go:327-363`):
+
+| Script Type | Filenames |
+|-------------|----------|
+| **Handler** | `handler.ts` or any file containing `"handler"` |
+| **Input** | `input.ts` or files containing both `"input"` and `"validator"` |
+| **Output** | `output.ts` or files containing both `"data"` and `"mapper"` |
+
+<Note>
+Handler auto-discovery only applies to **script-backed tools** (tools without `use` adapter binding).
+</Note>
+
+## TypeScript & npm Dependencies
+
+Scripts have full access to npm packages:
+
+### Installing Dependencies
+
+```bash
+npm install dayjs uuid zod
+npm install -D @types/uuid
+```
+
+### Using Dependencies
+
+```typescript
+import dayjs from 'dayjs';
+import { v4 as uuidv4 } from 'uuid';
+import { z } from 'zod';
+
+export default async function handler(payload: any) {
+  const id = uuidv4();
+  const timestamp = dayjs().format('YYYY-MM-DD HH:mm:ss');
+  
+  return [{ id, timestamp }];
+}
+```
+
+### Bundling Process
+
+During `hyperterse build`:
+
+1. **Vendor bundle** — All npm dependencies are bundled into `vendor.bundle.js`
+2. **Script bundles** — Each script is bundled separately (e.g., `get-user.input_transform.bundle.js`)
+3. **Export wrapping** — Scripts are wrapped to expose exports via `HyperterseBundle` global
+
+From `core/framework/js_runtime.go:54-58`:
+
+```go
+bundle := vm.Get("HyperterseBundle")
+if goja.IsUndefined(bundle) || goja.IsNull(bundle) {
+    return nil, fmt.Errorf("script %s does not expose HyperterseBundle exports", scriptPath)
+}
+```
+
+## Execution Flow
+
+The complete script execution pipeline (`core/framework/engine.go:41-107`):
+
+```go
+func (e *Engine) Execute(ctx context.Context, toolName string, userInputs map[string]any) ([]map[string]any, error) {
+    tool := e.GetTool(toolName)
+    
+    // 1. Authorization
+    if err := e.authRegistry.Authorize(ctx, tool); err != nil {
+        return nil, err
+    }
+
+    currentInputs := userInputs
+    
+    // 2. Input Transform
+    if bundlePath := tool.BundleOutputs["input_transform"]; bundlePath != "" {
+        transformed, err := e.scriptRT.Invoke(ctx, vendorPath, bundlePath, exportName, map[string]any{
+            "inputs": userInputs,
+            "tool":   tool.ToolPath,
+        })
+        if err != nil {
+            return nil, fmt.Errorf("input transform failed: %w", err)
+        }
+        currentInputs = transformed.(map[string]any)
+    }
+
+    var results []map[string]any
+    
+    // 3. Execute (Handler or Database)
+    if bundlePath := tool.BundleOutputs["handler"]; bundlePath != "" {
+        results, err = e.scriptRT.Invoke(ctx, vendorPath, bundlePath, exportName, ...)
+    } else {
+        results, err = e.executor.ExecuteTool(ctx, toolName, currentInputs)
+    }
+
+    // 4. Output Transform
+    if bundlePath := tool.BundleOutputs["output_transform"]; bundlePath != "" {
+        results, err = e.scriptRT.Invoke(ctx, vendorPath, bundlePath, exportName, map[string]any{
+            "results": results,
+            "tool":    tool.ToolPath,
+        })
+    }
+
+    return results, nil
+}
+```
+
+## Error Handling
+
+Script errors are caught and returned with context:
+
+```typescript
+export default async function handler(payload: any) {
+  const userId = payload?.inputs?.userId;
+  
+  if (!userId) {
+    // This error will be returned to the caller
+    throw new Error("userId is required");
+  }
+  
+  try {
+    const response = await fetch(`https://api.example.com/users/${userId}`);
+    if (!response.ok) {
+      throw new Error(`API returned ${response.status}`);
+    }
+    return await response.json();
+  } catch (error) {
+    // Rethrow with context
+    throw new Error(`Failed to fetch user: ${error.message}`);
+  }
+}
+```
+
+From `core/framework/engine.go:61-63`:
+
+```go
+if err != nil {
+    return nil, fmt.Errorf("input transform failed for tool %s: %w", toolName, err)
+}
+```
+
+## Promise Support
+
+Async functions are fully supported. The runtime waits for promise resolution:
+
+```typescript
+export default async function handler(payload: any) {
+  // Parallel API calls
+  const [weather, forecast] = await Promise.all([
+    fetch('https://api.weather.com/current'),
+    fetch('https://api.weather.com/forecast'),
+  ]);
+
+  return [
+    {
+      current: await weather.json(),
+      forecast: await forecast.json(),
+    }
+  ];
+}
+```
+
+From `core/framework/js_runtime.go:73-81`:
+
+```go
+if promise, ok := exported.(*goja.Promise); ok {
+    switch promise.State() {
+    case goja.PromiseStateRejected:
+        return nil, fmt.Errorf("script promise rejected: %s", promise.Result())
+    case goja.PromiseStateFulfilled:
+        return promise.Result().Export(), nil
+    default:
+        return nil, fmt.Errorf("script promise is pending; async operation did not settle")
+    }
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Tools" icon="wrench" href="/concepts/tools">
+    Learn how scripts integrate with tool definitions
+  </Card>
+  <Card title="Authentication" icon="lock" href="/concepts/authentication">
+    Secure your tools with auth plugins
+  </Card>
+</CardGroup>

@@ -1,0 +1,555 @@
+---
+title: Observability
+description: OpenTelemetry integration for traces and metrics
+---
+
+Hyperterse integrates [OpenTelemetry](https://opentelemetry.io) for distributed tracing and metrics export via OTLP (OpenTelemetry Protocol).
+
+## Architecture
+
+```
+┌──────────────┐
+│  Hyperterse  │
+│   Runtime    │
+└──────┬───────┘
+       │
+       ├─> Traces (spans)
+       │     │
+       │     └─> OTLP/gRPC → Collector/Backend
+       │
+       └─> Metrics (counters/histograms)
+             │
+             └─> OTLP/gRPC → Collector/Backend
+```
+
+**Supported Backends:**
+- Grafana Cloud
+- Honeycomb
+- Datadog
+- New Relic
+- Self-hosted OpenTelemetry Collector
+
+## Configuration
+
+### Environment Variables
+
+```bash
+# Enable observability (default: false)
+export HYPERTERSE_OTEL_ENABLED=true
+
+# OTLP endpoint (default: localhost:4317)
+export HYPERTERSE_OTEL_ENDPOINT=otel-collector.example.com:4317
+
+# Service metadata
+export HYPERTERSE_OTEL_SERVICE_NAME=hyperterse-api
+export HYPERTERSE_OTEL_SERVICE_VERSION=1.0.0
+export HYPERTERSE_OTEL_ENVIRONMENT=production
+
+# Trace sampling (default: 1.0 = 100%)
+export HYPERTERSE_OTEL_TRACE_SAMPLING_RATIO=0.1  # Sample 10%
+
+# Protocol (default: grpc)
+export HYPERTERSE_OTEL_PROTOCOL=grpc
+
+# Enable/disable signals (default: all enabled)
+export HYPERTERSE_OTEL_TRACES_ENABLED=true
+export HYPERTERSE_OTEL_METRICS_ENABLED=true
+export HYPERTERSE_OTEL_LOGS_ENABLED=true  # Reserved for future use
+```
+
+**Implementation:** `core/observability/config.go:28-52`
+
+### Environment Variable Substitution
+
+Configuration values support `{{ env.VAR }}` syntax:
+
+```bash
+export OTEL_ENDPOINT=collector.prod.example.com:4317
+export HYPERTERSE_OTEL_ENDPOINT="{{ env.OTEL_ENDPOINT }}"
+```
+
+**Source:** `config.go:114-138`
+
+### Default Configuration
+
+If no environment variables are set:
+
+```go
+Config{
+    Enabled:           false,
+    TracesEnabled:     true,
+    MetricsEnabled:    true,
+    ServiceName:       "hyperterse",
+    ServiceVersion:    "dev",
+    Environment:       "development",
+    OTLPEndpoint:      "localhost:4317",
+    OTLPProtocol:      "grpc",
+    TraceSamplingRate: 1.0,
+}
+```
+
+**Source:** `config.go:29-40`
+
+## Initialization
+
+Observability providers are initialized during runtime startup:
+
+```go
+obsProviders, err := observability.Setup(context.Background(), model, serviceVersion)
+if err != nil {
+    return nil, fmt.Errorf("failed to initialize observability: %w", err)
+}
+```
+
+**Source:** `core/runtime/server/server.go:57-60`
+
+### Setup Flow
+
+1. **Resolve Configuration** (`config.go:28-84`)
+   - Load defaults
+   - Apply environment variable overrides
+   - Substitute `{{ env.* }}` placeholders
+   - Validate sampling ratio (0.0-1.0)
+
+2. **Build Trace Provider** (`tracing.go:13-46`)
+   - Create OTLP gRPC exporter
+   - Configure resource attributes (service name, version, environment)
+   - Set up sampler (trace ID ratio-based)
+   - Attach batch span processor
+
+3. **Build Meter Provider** (`metrics.go:31-63`)
+   - Create OTLP gRPC exporter
+   - Configure resource attributes
+   - Attach periodic reader (default: 60s interval)
+
+4. **Register Global Providers**
+   ```go
+   otel.SetTracerProvider(traceProvider)
+   otel.SetMeterProvider(meterProvider)
+   ```
+   **Source:** `setup.go:57-58`
+
+5. **Set Error Handler**
+   ```go
+   otel.SetErrorHandler(otelLoggerErrorHandler{log: logger.New("observability")})
+   ```
+   **Source:** `setup.go:59`
+
+   Routes OpenTelemetry internal warnings to Hyperterse logger.
+
+## Traces
+
+### Span Hierarchy
+
+```
+http./mcp (server.go:352)
+  └─> executor.execute_tool (executor.go:42)
+        └─> [connector spans - future]
+```
+
+### HTTP Handler Spans
+
+```go
+ctx, span := rt.tracer.Start(req.Context(), "http."+endpoint)
+span.SetAttributes(
+    attribute.String("http.request.method", req.Method),
+    attribute.String("http.route", endpoint),
+)
+defer span.End()
+```
+
+**Source:** `server.go:352-357`
+
+**Attributes:**
+- `http.request.method`: HTTP method (GET, POST, DELETE)
+- `http.route`: Endpoint path (`/mcp`, `/heartbeat`)
+- `http.response.status_code`: HTTP status code (added after handler)
+
+**Error Handling:**
+```go
+if recorder.statusCode >= 500 {
+    span.SetStatus(codes.Error, "server_error")
+}
+```
+
+**Source:** `server.go:365-367`
+
+### Executor Spans
+
+```go
+tracer := otel.Tracer("runtime/executor")
+ctx, span := tracer.Start(ctx, "executor.execute_tool")
+span.SetAttributes(attribute.String("tool.name", toolName))
+defer span.End()
+```
+
+**Source:** `executor.go:41-44`
+
+**Attributes:**
+- `tool.name`: Tool identifier
+
+**Error Handling:**
+```go
+if err != nil {
+    span.SetStatus(codes.Error, "tool_execution_failed")
+}
+```
+
+**Source:** `executor.go:146`
+
+### Sampling
+
+Trace sampling is configured via `HYPERTERSE_OTEL_TRACE_SAMPLING_RATIO`:
+
+```go
+sdktrace.WithSampler(sdktrace.TraceIDRatioBased(cfg.TraceSamplingRate))
+```
+
+**Source:** `tracing.go:41`
+
+**Sampling Strategies:**
+- **1.0** (100%): Development, debugging
+- **0.1** (10%): Low-traffic production
+- **0.01** (1%): High-traffic production
+
+**Note:** Sampling decisions propagate to child spans (same trace ID = same decision).
+
+## Metrics
+
+### Instruments
+
+```go
+type metrics struct {
+    httpRequestsTotal   metric.Int64Counter
+    httpRequestDuration metric.Float64Histogram
+    toolExecutionsTotal metric.Int64Counter
+    toolDuration        metric.Float64Histogram
+    connectorOpsTotal   metric.Int64Counter
+    connectorOpDuration metric.Float64Histogram
+}
+```
+
+**Source:** `metrics.go:17-24`
+
+**Initialization:**
+```go
+meter := otel.Meter("hyperterse/runtime")
+m.httpRequestsTotal, _ = meter.Int64Counter("hyperterse.http.server.requests_total")
+m.httpRequestDuration, _ = meter.Float64Histogram("hyperterse.http.server.request_duration_ms")
+```
+
+**Source:** `metrics.go:67-69`
+
+### HTTP Metrics
+
+**Function:** `observability.RecordHTTPRequest(ctx, method, endpoint, status, durationMS)`
+
+**Source:** `metrics.go:77-86`
+
+**Metrics Recorded:**
+
+1. **`hyperterse.http.server.requests_total`** (Counter)
+   - **Attributes:**
+     - `http.request.method`: GET, POST, DELETE
+     - `http.route`: /mcp, /heartbeat
+     - `http.response.status_code`: 200, 404, 500, etc.
+
+2. **`hyperterse.http.server.request_duration_ms`** (Histogram)
+   - **Unit:** milliseconds
+   - **Attributes:** same as above
+
+**Example:**
+```go
+observability.RecordHTTPRequest(ctx, "POST", "/mcp", 200, 45.2)
+```
+
+**Invocation:** `server.go:363`
+
+### Tool Execution Metrics
+
+**Function:** `observability.RecordToolExecution(ctx, toolName, success, durationMS)`
+
+**Source:** `metrics.go:88-96`
+
+**Metrics Recorded:**
+
+1. **`hyperterse.tool.executions_total`** (Counter)
+   - **Attributes:**
+     - `tool.name`: Tool identifier
+     - `success`: true/false
+
+2. **`hyperterse.tool.execution_duration_ms`** (Histogram)
+   - **Unit:** milliseconds
+   - **Attributes:** same as above
+
+**Example:**
+```go
+observability.RecordToolExecution(ctx, "get_user", true, 12.5)
+```
+
+**Invocations:**
+- Success: `executor.go:157`
+- Failure: `executor.go:56, 69, 86, 95, 114, 123, 145`
+
+### Connector Metrics
+
+**Function:** `observability.RecordConnectorOperation(ctx, adapterName, connectorType, operation, success, durationMS)`
+
+**Source:** `metrics.go:98-108`
+
+**Metrics Recorded:**
+
+1. **`hyperterse.connector.operations_total`** (Counter)
+   - **Attributes:**
+     - `adapter.name`: Adapter identifier
+     - `connector.type`: postgres, mysql, mongo, redis
+     - `operation`: query, execute, ping, close
+     - `success`: true/false
+
+2. **`hyperterse.connector.operation_duration_ms`** (Histogram)
+   - **Unit:** milliseconds
+   - **Attributes:** same as above
+
+**Example:**
+```go
+observability.RecordConnectorOperation(ctx, "main_db", "postgres", "query", true, 25.3)
+```
+
+**Note:** Currently implemented in connector code (not shown).
+
+## Resource Attributes
+
+All traces and metrics include resource attributes:
+
+```go
+resource.New(
+    ctx,
+    resource.WithAttributes(
+        semconv.ServiceName(cfg.ServiceName),
+        semconv.ServiceVersion(cfg.ServiceVersion),
+        semconv.DeploymentEnvironmentName(cfg.Environment),
+    ),
+)
+```
+
+**Source:** `tracing.go:27-34`, `metrics.go:45-52`
+
+**Standard Attributes:**
+- `service.name`: Identifies the service
+- `service.version`: Version string
+- `deployment.environment`: development, staging, production
+
+## OTLP Export
+
+### Trace Export
+
+```go
+exporter, err := otlptracegrpc.New(
+    ctx,
+    otlptracegrpc.WithEndpoint(cfg.OTLPEndpoint),
+    otlptracegrpc.WithInsecure(),
+)
+```
+
+**Source:** `tracing.go:18-22`
+
+**Transport:** gRPC (insecure by default)
+
+**Batch Processor:**
+```go
+sdktrace.WithBatcher(exporter)
+```
+
+Spans are buffered and exported in batches (default: 512 spans or 5s).
+
+### Metric Export
+
+```go
+exporter, err := otlpmetricgrpc.New(
+    ctx,
+    otlpmetricgrpc.WithEndpoint(cfg.OTLPEndpoint),
+    otlpmetricgrpc.WithInsecure(),
+)
+```
+
+**Source:** `metrics.go:36-40`
+
+**Periodic Reader:**
+```go
+sdkmetric.WithReader(
+    sdkmetric.NewPeriodicReader(exporter),
+)
+```
+
+Metrics are exported every 60 seconds (default interval).
+
+## Shutdown
+
+Providers are gracefully shut down during runtime stop:
+
+```go
+if r.observability != nil {
+    shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+    defer shutdownCancel()
+    if err := r.observability.Shutdown(shutdownCtx); err != nil {
+        log.Warnf("Observability shutdown error: %v", err)
+    }
+}
+```
+
+**Source:** `server.go:286-292`
+
+**Shutdown Flow:**
+1. Flush remaining spans from batch processor
+2. Export final metrics
+3. Close OTLP exporters
+
+**Timeout:** 10 seconds
+
+## Example: Grafana Cloud
+
+```bash
+# Grafana Cloud OTLP endpoint
+export HYPERTERSE_OTEL_ENABLED=true
+export HYPERTERSE_OTEL_ENDPOINT=otlp-gateway-prod-us-central-0.grafana.net:443
+export HYPERTERSE_OTEL_SERVICE_NAME=hyperterse-prod
+export HYPERTERSE_OTEL_SERVICE_VERSION=1.2.0
+export HYPERTERSE_OTEL_ENVIRONMENT=production
+export HYPERTERSE_OTEL_TRACE_SAMPLING_RATIO=0.1
+
+# Authentication via headers (requires custom exporter config)
+# Note: Current implementation uses WithInsecure()
+# For production, modify tracing.go and metrics.go to use:
+# otlptracegrpc.WithHeaders(map[string]string{
+#     "Authorization": "Basic " + base64(instanceID + ":" + apiToken),
+# })
+```
+
+## Example: Self-Hosted Collector
+
+**docker-compose.yml:**
+```yaml
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector:latest
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml
+    ports:
+      - 4317:4317  # OTLP gRPC
+      - 4318:4318  # OTLP HTTP
+
+  hyperterse:
+    environment:
+      - HYPERTERSE_OTEL_ENABLED=true
+      - HYPERTERSE_OTEL_ENDPOINT=otel-collector:4317
+```
+
+**otel-collector-config.yaml:**
+```yaml
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  batch:
+
+exporters:
+  prometheus:
+    endpoint: 0.0.0.0:8889
+  jaeger:
+    endpoint: jaeger:14250
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [jaeger]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [prometheus]
+```
+
+## Dependencies
+
+```go
+import (
+    "go.opentelemetry.io/otel"
+    "go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
+    "go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+    "go.opentelemetry.io/otel/metric"
+    "go.opentelemetry.io/otel/sdk/metric"
+    "go.opentelemetry.io/otel/sdk/trace"
+    "go.opentelemetry.io/otel/trace"
+)
+```
+
+**Versions** (from `go.mod`):
+- `go.opentelemetry.io/otel`: v1.40.0
+- `go.opentelemetry.io/otel/sdk`: v1.40.0
+- `go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc`: v1.40.0
+- `go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc`: v1.40.0
+
+## Attribute Reference
+
+All observability attributes are defined in `core/observability/contract.go:7-24`:
+
+```go
+const (
+    AttrServiceName         = "service.name"
+    AttrServiceVersion      = "service.version"
+    AttrDeploymentEnv       = "deployment.environment"
+    AttrTraceID             = "trace_id"
+    AttrSpanID              = "span_id"
+    AttrRequestID           = "request.id"
+    AttrLogTag              = "log.tag"
+    AttrToolName            = "tool.name"
+    AttrAdapterName         = "adapter.name"
+    AttrConnectorType       = "connector.type"
+    AttrHTTPMethod          = "http.request.method"
+    AttrHTTPEndpoint        = "http.route"
+    AttrHTTPStatusCode      = "http.response.status_code"
+    AttrErrorType           = "error.type"
+    AttrErrorMessage        = "error.message"
+    AttrExceptionStacktrace = "exception.stacktrace"
+)
+```
+
+## Security: Attribute Redaction
+
+Sensitive attribute values are automatically redacted:
+
+```go
+func RedactAttributeValue(key string, value string) string {
+    lower := strings.ToLower(key)
+    for _, needle := range secretKeySubstrings {
+        if strings.Contains(lower, needle) {
+            return "[REDACTED]"
+        }
+    }
+    return value
+}
+```
+
+**Source:** `contract.go:39-47`
+
+**Redacted Substrings:**
+- password
+- passwd
+- secret
+- token
+- api_key
+- apikey
+- authorization
+- connection_string
+- dsn
+
+**Example:**
+```go
+RedactAttributeValue("database_password", "secret123")
+// → "[REDACTED]"
+```

@@ -1,0 +1,404 @@
+---
+title: Tool Definition & Discovery
+description: Define MCP tools using declarative .terse files with SQL statements or custom TypeScript handlers
+---
+
+Tools are the core building blocks of your Hyperterse API. Each tool represents an MCP (Model Context Protocol) tool that can be invoked by AI agents, exposing database queries or custom logic.
+
+## Tool Types
+
+Hyperterse supports two types of tools:
+
+<CardGroup cols={2}>
+  <Card title="Database-Backed Tools" icon="database">
+    Execute SQL statements against an adapter
+    
+    Uses the `use` field to bind to a database adapter
+  </Card>
+  <Card title="Script-Backed Tools" icon="code">
+    Run custom TypeScript handlers
+    
+    Uses the `handler` field for full control
+  </Card>
+</CardGroup>
+
+<Warning>
+A tool **cannot** define both `use` and `handler` — you must choose one approach (`core/framework/compiler.go:416-418`).
+</Warning>
+
+## Tool Definition Schema
+
+Tools are defined in `config.terse` files within the `tools/` directory:
+
+```yaml tools/get-user/config.terse
+description: "Get user by id, with input validation and response mapping."
+use: my-adapter
+statement: |
+  SELECT * FROM users WHERE id = {{ inputs.userId }}
+inputs:
+  userId:
+    type: int
+    description: "User ID to fetch."
+mappers:
+  input: "./user-input-validator.ts"
+  output: "./user-data-mapper.ts"
+auth:
+  plugin: allow_all
+```
+
+### Schema Reference
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | No | Tool identifier (defaults to directory-based name) |
+| `description` | string | No | Tool description for AI agents |
+| `use` | string | Conditional | Adapter name (required for DB-backed tools) |
+| `statement` | string | Conditional | SQL or command to execute (required for DB-backed tools) |
+| `handler` | string | Conditional | Path to TypeScript handler (required for script-backed tools) |
+| `inputs` | map | No | Input parameter definitions |
+| `mappers.input` | string | No | Input transform script path |
+| `mappers.output` | string | No | Output transform script path |
+| `auth.plugin` | string | No | Authorization plugin name (default: none) |
+| `auth.policy` | map | No | Plugin-specific policy configuration |
+
+## Database-Backed Tools
+
+Database-backed tools execute SQL statements against a named adapter.
+
+### Input Parameters
+
+Define typed inputs that are validated before execution:
+
+```yaml
+inputs:
+  userId:
+    type: int
+    description: "User ID to fetch."
+  includeDeleted:
+    type: bool
+    description: "Include soft-deleted users."
+    optional: true
+    default: false
+  limit:
+    type: int
+    description: "Maximum number of results."
+    optional: true
+    default: 10
+```
+
+**Supported types** (`core/framework/types.go:421-423`):
+- `string`
+- `int`
+- `float`
+- `bool`
+- `json`
+
+### Statement Templating
+
+Use `{{ inputs.paramName }}` to reference input parameters in statements:
+
+```yaml
+statement: |
+  SELECT id, name, email, created_at 
+  FROM users 
+  WHERE id = {{ inputs.userId }}
+  AND deleted_at IS NULL
+```
+
+<Note>
+The runtime engine substitutes input values before sending the statement to the database connector.
+</Note>
+
+### PostgreSQL Example
+
+<CodeGroup>
+```yaml config.terse
+description: "Fetch user orders with filtering"
+use: my-adapter
+statement: |
+  SELECT 
+    o.id,
+    o.total,
+    o.status,
+    o.created_at
+  FROM orders o
+  WHERE o.user_id = {{ inputs.userId }}
+    AND o.status = {{ inputs.status }}
+  ORDER BY o.created_at DESC
+  LIMIT {{ inputs.limit }}
+inputs:
+  userId:
+    type: int
+    description: "User ID to fetch orders for"
+  status:
+    type: string
+    description: "Order status filter"
+    optional: true
+    default: "pending"
+  limit:
+    type: int
+    description: "Maximum results"
+    optional: true
+    default: 10
+```
+
+```yaml my-adapter.terse (Adapter)
+connector: postgres
+connection_string: postgresql://demo:demo@localhost:5432/demo
+options:
+  sslmode: disable
+```
+</CodeGroup>
+
+### MongoDB Example
+
+MongoDB tools use JSON-based commands:
+
+```yaml tools/find-orders/config.terse
+description: "Find orders in MongoDB"
+use: mongodb-adapter
+statement: |
+  {
+    "database": "mydb",
+    "command": {
+      "find": "orders",
+      "filter": { "user_id": {{ inputs.userId }} },
+      "limit": {{ inputs.limit }}
+    }
+  }
+inputs:
+  userId:
+    type: string
+    description: "User ID"
+  limit:
+    type: int
+    description: "Max results"
+    default: 10
+```
+
+## Script-Backed Tools
+
+Script-backed tools run custom TypeScript handlers instead of database queries. This is useful for:
+
+- Calling external APIs
+- Complex business logic
+- Aggregating data from multiple sources
+- Mock/demo implementations
+
+### Handler Function
+
+Handlers receive a payload with `inputs` and optional `route` information:
+
+```typescript tools/get-weather/weather-handler.ts
+import dayjs from "dayjs";
+
+type Inputs = {
+  city?: string;
+  units?: "metric" | "imperial";
+};
+
+export default async function handler(payload: { inputs?: Inputs; route?: string }) {
+  const city = payload?.inputs?.city ?? "Bengaluru";
+  const units = payload?.inputs?.units ?? "metric";
+
+  const sampleTemp = units === "imperial" ? 77 : 25;
+  const sampleWind = units === "imperial" ? "8 mph" : "13 km/h";
+
+  return [
+    {
+      city,
+      units,
+      observed_at: dayjs().toISOString(),
+      weather: "Partly cloudy",
+      temperature: sampleTemp,
+      wind: sampleWind,
+      source: "demo-handler",
+      route: payload?.route ?? "unknown"
+    }
+  ];
+}
+```
+
+### Handler Configuration
+
+```yaml tools/get-weather/config.terse
+description: "Custom weather MCP tool implemented entirely in TypeScript handler."
+handler: "./weather-handler.ts"
+auth:
+  plugin: allow_all
+```
+
+<Note>
+Script-backed tools can still define `inputs` for validation, but they don't use the `use` or `statement` fields.
+</Note>
+
+### Return Format
+
+Handlers must return:
+- **Array of objects**: `[]map[string]any` in Go terms
+- **Single object**: Automatically wrapped in an array
+- **Primitive values**: Wrapped as `[{ "value": ... }]`
+
+From `core/framework/engine.go:109-131`:
+
+```go
+func coerceResults(value any) []map[string]any {
+    if value == nil {
+        return []map[string]any{}
+    }
+    if typed, ok := value.([]map[string]any); ok {
+        return typed
+    }
+    if m, ok := value.(map[string]any); ok {
+        return []map[string]any{m}
+    }
+    return []map[string]any{{"value": value}}
+}
+```
+
+## Tool Naming
+
+Tool names are derived from directory paths using normalization rules:
+
+```
+tools/get-user/config.terse           → Tool: "get-user"
+tools/analytics/daily-report/         → Tool: "analytics-daily-report"
+tools/user management/config.terse    → Tool: "user-management"
+```
+
+**Normalization** (`core/framework/types.go:90-109`):
+- Replaces non-alphanumeric characters (except `-` and `_`) with hyphens
+- Converts to lowercase
+- Trims leading/trailing hyphens
+- Empty segments become `"index"`
+
+**Override with `name` field:**
+
+```yaml
+name: custom-tool-name
+description: "This will be named 'custom-tool-name' regardless of directory"
+```
+
+## Input Validation & Transforms
+
+Tools can define input transform scripts that run **before** execution:
+
+```yaml
+mappers:
+  input: "./user-input-validator.ts"
+```
+
+### Input Transform Example
+
+```typescript user-input-validator.ts
+export default async function inputTransform(payload: { inputs?: Record<string, unknown> }) {
+  const inputs = payload?.inputs ?? {};
+  const rawUserId = inputs.userId;
+
+  if (rawUserId === undefined || rawUserId === null) {
+    throw new Error("user_id is required");
+  }
+
+  const userId = Number(rawUserId);
+  if (!Number.isFinite(userId) || userId <= 0 || !Number.isInteger(userId)) {
+    throw new Error("user_id must be a positive integer");
+  }
+
+  return {
+    ...inputs,
+    userId,
+  };
+}
+```
+
+<Note>
+If the transform throws an error, the tool execution is aborted and the error is returned to the caller.
+</Note>
+
+## Output Transforms
+
+Output transforms run **after** the database query or handler, allowing you to reshape results:
+
+```yaml
+mappers:
+  output: "./user-data-mapper.ts"
+```
+
+### Output Transform Example
+
+```typescript user-data-mapper.ts
+import dayjs from "dayjs";
+import { v4 as uuidv4 } from "uuid";
+
+type Row = Record<string, unknown>;
+
+export default async function outputTransform(payload: { results?: Row[] }) {
+  const rows = payload?.results ?? [];
+  return rows.map((row) => ({
+    trace_id: uuidv4(),
+    id: row.id,
+    name: row.name,
+    email: row.email,
+    created_at_iso: row.created_at ? dayjs(String(row.created_at)).toISOString() : null,
+  }));
+}
+```
+
+## Execution Pipeline
+
+The complete tool execution flow (`core/framework/engine.go:41-107`):
+
+```mermaid
+graph TD
+    A[Tool Invoked] --> B[Authorization Check]
+    B --> C{Auth Plugin}
+    C -->|Denied| D[Return Error]
+    C -->|Allowed| E[Input Transform]
+    E --> F{Has Handler?}
+    F -->|Yes| G[Execute Handler Script]
+    F -->|No| H[Execute DB Statement]
+    G --> I[Output Transform]
+    H --> I
+    I --> J[Return Results]
+```
+
+**Step-by-step:**
+
+1. **Authorization** — Auth plugin checks if the request is allowed
+2. **Input Transform** — Validate and transform inputs (if defined)
+3. **Execution** — Either run handler script or execute database statement
+4. **Output Transform** — Transform results (if defined)
+5. **Return** — Results sent back to caller
+
+## Tool Discovery
+
+Tools are discovered at compile time by walking the `tools/` directory and finding all `config.terse` files (`core/framework/compiler.go:174-197`):
+
+```go
+func discoverToolTerseFiles(toolsDir string) ([]string, error) {
+    var files []string
+    err := filepath.WalkDir(toolsDir, func(path string, d fs.DirEntry, walkErr error) error {
+        if !d.IsDir() && strings.EqualFold(filepath.Base(path), "config.terse") {
+            files = append(files, path)
+        }
+        return nil
+    })
+    return files, err
+}
+```
+
+All discovered tools are added to the compiled model and exposed via the MCP protocol.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Scripts" icon="code" href="/concepts/scripts">
+    Learn about TypeScript handlers and transforms
+  </Card>
+  <Card title="Authentication" icon="lock" href="/concepts/authentication">
+    Secure your tools with auth plugins
+  </Card>
+  <Card title="Adapters" icon="database" href="/concepts/adapters">
+    Understand database adapter configuration
+  </Card>
+</CardGroup>

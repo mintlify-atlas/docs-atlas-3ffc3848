@@ -1,0 +1,643 @@
+---
+title: 'Migration Guide: v1 to v2'
+description: 'Step-by-step guide to migrate your Hyperterse project from v1 to v2'
+---
+
+## Overview
+
+Hyperterse v2.0.0 (released 2026-02-24) is a breaking redesign that transforms Hyperterse from a single-file query gateway into a compiled, filesystem-based MCP framework. This guide helps you migrate your v1 projects to v2.
+
+<Warning>
+  v2 is not backward compatible with v1. All projects require migration. Plan for 1-4 hours depending on project complexity.
+</Warning>
+
+## What Changed
+
+v2 introduces a fundamentally different architecture:
+
+| Aspect | v1 | v2 |
+|--------|----|----|  
+| **Config Structure** | Single `.terse` file with inline adapters and queries | Root `.hyperterse` + `app/adapters/*.terse` + `app/tools/*/config.terse` |
+| **Tool Discovery** | Manual query definitions | Filesystem-based auto-discovery |
+| **HTTP Endpoints** | `/query/{name}` for direct queries | MCP-only via `/mcp` (JSON-RPC 2.0) |
+| **Authentication** | Global or none | Per-tool pluggable auth |
+| **CLI Commands** | `hyperterse run -f config.terse` | `hyperterse start` (dev) or `hyperterse serve dist/` (prod) |
+| **Build Process** | Direct interpretation | Compile with `hyperterse build` |
+| **Scripting** | Not supported | Embedded TypeScript handlers |
+| **Transport** | HTTP REST + MCP SSE | MCP Streamable HTTP only |
+
+## Breaking Changes
+
+From `CHANGELOGS.md:44-54`:
+
+| Change | Impact | Action Required |
+|--------|--------|----------------|
+| Inline `adapters` removed | Config will not parse | Extract to `app/adapters/*.terse` |
+| Inline `queries` removed | Config will not parse | Extract to `app/tools/*/config.terse` |
+| `/query/{name}` endpoint removed | HTTP clients break | Migrate to MCP `tools/call` |
+| Auth now per-tool | Tools unauthenticated by default | Add `auth` blocks to each tool |
+| DSL parser deprecated | Text-format blocks unsupported | Convert to YAML format |
+| Build step introduced | Direct interpretation replaced | Add `build` + `serve` to pipeline |
+
+## Migration Steps
+
+### Step 1: Backup Your v1 Project
+
+```bash
+cp config.terse config.terse.v1.backup
+```
+
+### Step 2: Install v2
+
+```bash
+# Upgrade to latest version
+hyperterse upgrade
+
+# Verify v2 installation
+hyperterse --version
+# Should show v2.0.0 or higher
+```
+
+### Step 3: Initialize v2 Project Structure
+
+```bash
+# Create new v2 structure
+mkdir my-project-v2
+cd my-project-v2
+hyperterse init
+```
+
+This creates:
+```
+my-project-v2/
+  .hyperterse           # Root config
+  app/
+    adapters/           # Database connection configs
+    tools/              # Tool definitions
+```
+
+### Step 4: Migrate Root Config
+
+**v1 config.terse:**
+```yaml
+name: my-app
+
+adapters:
+  - name: main-db
+    connector: postgres
+    connection_string: postgresql://user:pass@localhost:5432/db
+
+queries:
+  - name: get-user
+    adapter: main-db
+    description: "Get user by ID"
+    statement: |
+      SELECT * FROM users WHERE id = {{ inputs.user_id }}
+    inputs:
+      user_id:
+        type: int
+```
+
+**v2 .hyperterse:**
+```yaml
+name: my-app
+```
+
+That's it! The root config only needs the project name in v2.
+
+### Step 5: Extract Adapters
+
+For each adapter in your v1 config, create a file in `app/adapters/`:
+
+**app/adapters/main-db.terse:**
+```yaml
+connector: postgres
+connection_string: "${env.DATABASE_URL}"
+options:
+  sslmode: require
+```
+
+<Info>
+  Use environment variable substitution (`${env.VAR}`) for connection strings in v2. Never hardcode credentials.
+</Info>
+
+Migration mapping:
+- `adapters[].name` → filename (e.g., `main-db.terse`)
+- `adapters[].connector` → `connector`
+- `adapters[].connection_string` → `connection_string`
+- `adapters[].options` → `options` (same structure)
+
+### Step 6: Extract Queries to Tools
+
+For each query, create a directory in `app/tools/` with a `config.terse` file:
+
+**v1 query:**
+```yaml
+queries:
+  - name: get-user
+    adapter: main-db
+    description: "Get user by ID"
+    statement: |
+      SELECT id, name, email FROM users 
+      WHERE id = {{ inputs.user_id }}
+    inputs:
+      user_id:
+        type: int
+        description: "User ID to fetch"
+```
+
+**v2 app/tools/get-user/config.terse:**
+```yaml
+description: "Get user by ID"
+use: main-db
+statement: |
+  SELECT id, name, email FROM users 
+  WHERE id = {{ inputs.user_id }}
+inputs:
+  user_id:
+    type: int
+    description: "User ID to fetch"
+auth:
+  plugin: api_key
+```
+
+Migration mapping:
+- `queries[].name` → directory name (e.g., `app/tools/get-user/`)
+- `queries[].adapter` → `use` (can now reference multiple adapters)
+- `queries[].description` → `description`
+- `queries[].statement` → `statement`
+- `queries[].inputs` → `inputs` (same structure)
+- **NEW**: Add `auth` block (required for security)
+
+<Warning>
+  **CRITICAL**: In v1, auth was often global or undefined. In v2, each tool needs an `auth` configuration. Tools without auth are **unauthenticated by default**.
+</Warning>
+
+### Step 7: Add Authentication
+
+Every tool should have an auth configuration:
+
+```yaml
+# Development/testing only
+auth:
+  plugin: allow_all
+
+# Production
+auth:
+  plugin: api_key
+```
+
+Set the API key in environment:
+```bash
+export HYPERTERSE_API_KEY="your-secure-key"
+```
+
+See [Production Hardening](/security/production-hardening) for details.
+
+### Step 8: Handle Multiple Adapters (New Feature)
+
+v2 allows tools to use multiple adapters:
+
+**v1 (not possible):**
+```yaml
+# Could only use one adapter per query
+queries:
+  - name: sync-data
+    adapter: source-db
+    statement: "SELECT * FROM products"
+```
+
+**v2:**
+```yaml
+# Can use multiple adapters in one tool
+description: "Sync data between databases"
+use:
+  - source-db
+  - target-db
+handler: "./sync-handler.ts"
+auth:
+  plugin: api_key
+```
+
+Create `app/tools/sync-data/sync-handler.ts`:
+```typescript
+export default async function handler({ adapters, inputs }) {
+  const sourceData = await adapters['source-db'].query(
+    "SELECT * FROM products WHERE updated_at > $1",
+    [inputs.since]
+  );
+  
+  for (const row of sourceData) {
+    await adapters['target-db'].query(
+      "INSERT INTO products (id, name) VALUES ($1, $2) ON CONFLICT DO UPDATE",
+      [row.id, row.name]
+    );
+  }
+  
+  return { synced: sourceData.length };
+}
+```
+
+### Step 9: Migrate Clients from `/query` to MCP
+
+**v1 HTTP client:**
+```bash
+curl -X POST http://localhost:8080/query/get-user \
+  -H "Content-Type: application/json" \
+  -d '{ "user_id": 123 }'
+```
+
+**v2 MCP client:**
+```bash
+curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-api-key" \
+  -d '{
+    "jsonrpc": "2.0",
+    "method": "tools/call",
+    "params": {
+      "name": "get-user",
+      "arguments": { "user_id": 123 }
+    },
+    "id": 1
+  }'
+```
+
+Response format:
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "[{\"id\": 123, \"name\": \"John\", \"email\": \"john@example.com\"}]"
+      }
+    ]
+  }
+}
+```
+
+<Info>
+  The MCP protocol is more verbose but provides better standardization for AI/LLM integrations.
+</Info>
+
+### Step 10: Update CLI Commands
+
+**v1 development:**
+```bash
+hyperterse run -f config.terse
+# or
+hyperterse dev -f config.terse
+```
+
+**v2 development:**
+```bash
+hyperterse start
+# With hot reload:
+hyperterse start --watch
+```
+
+**v2 production:**
+```bash
+# Build artifact
+hyperterse build -o dist/
+
+# Serve from artifact
+hyperterse serve dist/
+```
+
+The build step compiles config and bundles TypeScript handlers into a deployable artifact.
+
+### Step 11: Update Deployment Pipeline
+
+**v1 deployment:**
+```dockerfile
+FROM hyperterse/hyperterse:v1
+COPY config.terse /app/config.terse
+CMD ["hyperterse", "run", "-f", "/app/config.terse"]
+```
+
+**v2 deployment:**
+```dockerfile
+FROM node:20 AS builder
+WORKDIR /build
+COPY .hyperterse app/ ./
+RUN npm install -g hyperterse
+RUN hyperterse build -o dist/
+
+FROM hyperterse/hyperterse:v2
+WORKDIR /app
+COPY --from=builder /build/dist ./dist
+CMD ["hyperterse", "serve", "dist/"]
+```
+
+Key changes:
+- Multi-stage build to compile artifact
+- `serve` instead of `run`
+- Environment variables injected at runtime, not build time
+
+## Example: Complete Migration
+
+### v1 Project
+
+**config.terse:**
+```yaml
+name: customer-api
+
+adapters:
+  - name: customers-db
+    connector: postgres
+    connection_string: postgresql://user:pass@db:5432/customers
+  
+  - name: cache
+    connector: redis
+    connection_string: redis://redis:6379
+
+queries:
+  - name: get-customer
+    adapter: customers-db
+    description: "Get customer by ID"
+    statement: |
+      SELECT id, name, email, created_at 
+      FROM customers 
+      WHERE id = {{ inputs.customer_id }}
+    inputs:
+      customer_id:
+        type: int
+  
+  - name: search-customers
+    adapter: customers-db
+    description: "Search customers by name"
+    statement: |
+      SELECT id, name, email 
+      FROM customers 
+      WHERE name ILIKE '%{{ inputs.query }}%'
+      LIMIT 50
+    inputs:
+      query:
+        type: string
+```
+
+### v2 Project
+
+**Directory structure:**
+```
+customer-api-v2/
+  .hyperterse
+  .env
+  app/
+    adapters/
+      customers-db.terse
+      cache.terse
+    tools/
+      get-customer/
+        config.terse
+      search-customers/
+        config.terse
+        input-validator.ts
+```
+
+**.hyperterse:**
+```yaml
+name: customer-api
+```
+
+**.env:**
+```bash
+DATABASE_URL=postgresql://user:pass@db:5432/customers
+REDIS_URL=redis://redis:6379
+HYPERTERSE_API_KEY=your-secure-api-key
+```
+
+**app/adapters/customers-db.terse:**
+```yaml
+connector: postgres
+connection_string: "${env.DATABASE_URL}"
+options:
+  sslmode: require
+  pool_size: 10
+```
+
+**app/adapters/cache.terse:**
+```yaml
+connector: redis
+connection_string: "${env.REDIS_URL}"
+```
+
+**app/tools/get-customer/config.terse:**
+```yaml
+description: "Get customer by ID"
+use: customers-db
+statement: |
+  SELECT id, name, email, created_at 
+  FROM customers 
+  WHERE id = {{ inputs.customer_id }}
+inputs:
+  customer_id:
+    type: int
+    description: "Customer ID"
+auth:
+  plugin: api_key
+```
+
+**app/tools/search-customers/config.terse:**
+```yaml
+description: "Search customers by name"
+use: customers-db
+statement: |
+  SELECT id, name, email 
+  FROM customers 
+  WHERE name ILIKE '%{{ inputs.query }}%'
+  LIMIT 50
+inputs:
+  query:
+    type: string
+    description: "Search query"
+mappers:
+  input: "./input-validator.ts"
+auth:
+  plugin: api_key
+```
+
+**app/tools/search-customers/input-validator.ts:**
+```typescript
+// v2 feature: TypeScript input validation
+export default async function inputTransform(payload: { inputs?: Record<string, unknown> }) {
+  const query = String(payload.inputs?.query || "").trim();
+  
+  // Prevent SQL injection
+  if (query.includes("'") || query.includes("\"") || query.includes(";")) {
+    throw new Error("Query contains invalid characters");
+  }
+  
+  // Limit length
+  if (query.length > 100) {
+    throw new Error("Query too long (max 100 characters)");
+  }
+  
+  if (query.length < 2) {
+    throw new Error("Query too short (min 2 characters)");
+  }
+  
+  return { query };
+}
+```
+
+## Testing Your Migration
+
+### 1. Validate Configuration
+
+```bash
+hyperterse validate
+```
+
+Expected output:
+```
+✓ Configuration is valid
+✓ Found 2 adapters
+✓ Found 2 tools
+```
+
+### 2. Start Development Server
+
+```bash
+hyperterse start --watch
+```
+
+### 3. Test Tool Discovery
+
+```bash
+curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "method": "tools/list",
+    "id": 1
+  }'
+```
+
+Should return both tools: `get-customer` and `search-customers`.
+
+### 4. Test Tool Invocation
+
+```bash
+curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-secure-api-key" \
+  -d '{
+    "jsonrpc": "2.0",
+    "method": "tools/call",
+    "params": {
+      "name": "get-customer",
+      "arguments": { "customer_id": 1 }
+    },
+    "id": 1
+  }'
+```
+
+### 5. Build and Test Artifact
+
+```bash
+hyperterse build -o dist/
+hyperterse serve dist/
+```
+
+## Common Migration Issues
+
+### Issue: "adapters is required"
+
+**Cause:** Still using v1 config format with inline adapters.
+
+**Solution:** Extract adapters to separate files in `app/adapters/`.
+
+### Issue: "tools is required"
+
+**Cause:** No tool directories in `app/tools/`.
+
+**Solution:** Create tool directories with `config.terse` files.
+
+### Issue: 401 Unauthorized on tool calls
+
+**Cause:** Missing `auth` block or incorrect API key.
+
+**Solution:** Add `auth` block to tool config and set `HYPERTERSE_API_KEY`.
+
+### Issue: "Input validation failed"
+
+**Cause:** Input types or names changed.
+
+**Solution:** Verify `inputs` section matches v1 definitions exactly (structure is the same).
+
+### Issue: TypeScript handler not found
+
+**Cause:** Handler file path incorrect or file doesn't exist.
+
+**Solution:** Ensure handler path in `config.terse` is relative to tool directory:
+```yaml
+handler: "./my-handler.ts"  # Correct
+handler: "my-handler.ts"    # Incorrect (missing ./)
+```
+
+### Issue: Environment variables not substituted
+
+**Cause:** Using v1 syntax or missing `env.` prefix.
+
+**Solution:** Use `${env.VARIABLE_NAME}` syntax:
+```yaml
+connection_string: "${env.DATABASE_URL}"  # Correct
+connection_string: "$DATABASE_URL"        # Incorrect
+```
+
+## Migration Checklist
+
+<Check>
+  - [ ] v2 installed and version verified
+  - [ ] New project structure created with `hyperterse init`
+  - [ ] Root `.hyperterse` contains project name only
+  - [ ] All adapters extracted to `app/adapters/*.terse`
+  - [ ] All queries migrated to `app/tools/*/config.terse`
+  - [ ] All tools have `auth` blocks configured
+  - [ ] Connection strings use environment variables
+  - [ ] `.env` file created and added to `.gitignore`
+  - [ ] `HYPERTERSE_API_KEY` set in environment
+  - [ ] String inputs have input mapper validation
+  - [ ] `hyperterse validate` passes
+  - [ ] Development server starts successfully
+  - [ ] All tools appear in MCP `tools/list`
+  - [ ] Tool invocations work via MCP `tools/call`
+  - [ ] Build completes: `hyperterse build -o dist/`
+  - [ ] Artifact serves correctly: `hyperterse serve dist/`
+  - [ ] HTTP clients migrated to MCP protocol
+  - [ ] Deployment pipeline updated with build step
+  - [ ] Documentation updated with v2 usage
+</Check>
+
+## Next Steps
+
+After migration:
+
+1. **Explore new v2 features:**
+   - [Embedded TypeScript handlers](/concepts/scripts) for custom logic
+   - [Per-tool caching](/runtime/caching) for performance
+   - [Input/output mappers](/concepts/scripts) for transformations
+
+2. **Harden security:**
+   - [Input Safety Guide](/security/input-safety)
+   - [Production Hardening](/security/production-hardening)
+
+3. **Optimize deployment:**
+   - Set up CI/CD with `hyperterse build`
+   - Configure monitoring and observability
+   - Implement rate limiting at proxy layer
+
+## Getting Help
+
+If you encounter issues during migration:
+
+- Check [GitHub Issues](https://github.com/hyperterse/hyperterse/issues)
+- Review [v2.0.0 changelog](https://github.com/hyperterse/hyperterse/releases/tag/v2.0.0)
+- Ask in [GitHub Discussions](https://github.com/hyperterse/hyperterse/discussions)
+
+Include your v1 config and migration attempts for faster assistance.

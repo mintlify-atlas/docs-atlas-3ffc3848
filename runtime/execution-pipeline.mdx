@@ -1,0 +1,450 @@
+---
+title: Execution Pipeline
+description: Request flow from MCP to tool execution and response
+---
+
+This document traces the complete execution flow from an MCP request to a database query result.
+
+## Pipeline Overview
+
+```
+┌─────────────────┐
+│   MCP Client    │
+└────────┬────────┘
+         │ POST /mcp {method: "tools/call", params: {name: "execute", arguments: {...}}}
+         ▼
+┌─────────────────┐
+│  HTTP Handler   │  server.go:172
+│  (with CORS)    │
+└────────┬────────┘
+         │ context + headers
+         ▼
+┌─────────────────┐
+│ MCP SDK Handler │  Streamable HTTP
+│  (go-sdk)       │
+└────────┬────────┘
+         │ CallToolRequest
+         ▼
+┌─────────────────┐
+│  MCP Adapter    │  mcp.go:140
+│  callExecute    │
+└────────┬────────┘
+         │ parse arguments, extract headers
+         ▼
+┌─────────────────┐
+│   Framework     │  framework.Execute
+│   Engine        │  (if available)
+└────────┬────────┘
+         │ OR
+         ▼
+┌─────────────────┐
+│    Executor     │  executor.go:38
+│  ExecuteTool    │
+└────────┬────────┘
+         │
+         ├─> Validate inputs (utils/validator.go)
+         │
+         ├─> Substitute env vars ({{ env.VAR }})
+         │
+         ├─> Substitute input vars ({{ input.field }})
+         │
+         ├─> Check cache (cache.go:43)
+         │       │
+         │       ├─> Cache hit? Return cached result
+         │       │
+         │       └─> Cache miss? Continue...
+         │
+         ├─> Resolve adapter (connectorManager.Get)
+         │
+         ▼
+┌─────────────────┐
+│   Connector     │  connectors/{postgres,mysql,mongo,...}
+│   Execute()     │
+└────────┬────────┘
+         │ Execute SQL/query
+         ▼
+┌─────────────────┐
+│    Database     │
+└────────┬────────┘
+         │ rows/documents
+         ▼
+┌─────────────────┐
+│    Executor     │  executor.go:150-153
+│  (cache result) │
+└────────┬────────┘
+         │ []map[string]any
+         ▼
+┌─────────────────┐
+│  MCP Adapter    │  mcp.go:226-235
+│  (serialize)    │
+└────────┬────────┘
+         │ JSON text content
+         ▼
+┌─────────────────┐
+│ MCP SDK Handler │
+│  (response)     │
+└────────┬────────┘
+         │ JSON-RPC response
+         ▼
+┌─────────────────┐
+│  HTTP Response  │
+└─────────────────┘
+```
+
+## Phase 1: HTTP Request
+
+**Endpoint:** `/mcp`
+
+**Handler:** `core/runtime/server/server.go:172`
+
+```go
+mcpHTTPHandler := mcpsdk.NewStreamableHTTPHandler(func(_ *http.Request) *mcpsdk.Server {
+    return r.mcpAdapter.Server()
+}, &mcpsdk.StreamableHTTPOptions{})
+
+r.mux.Handle("/mcp", r.instrumentHandler("/mcp", r.withCORS(mcpHTTPHandler)))
+```
+
+**Middleware Stack:**
+1. **CORS**: Adds cross-origin headers
+2. **Instrumentation**: Creates tracing span, records metrics
+3. **StreamableHTTPHandler**: Decodes JSON-RPC and routes to MCP SDK
+
+## Phase 2: MCP Adapter
+
+**Entry Point:** `core/runtime/mcp/mcp.go:140`
+
+### Step 1: Parse Arguments
+
+```go
+inputs, invalidParamsErr := parseArguments(req)
+if invalidParamsErr != nil {
+    return invalidParamsErr, nil
+}
+```
+
+**Source:** `mcp.go:149-152`
+
+Unmarshals JSON arguments into `map[string]any`.
+
+### Step 2: Extract Tool Name & Inputs
+
+```go
+toolName, ok := inputs["tool"].(string)
+toolInputs, ok := inputs["inputs"].(map[string]any)
+```
+
+**Source:** `mcp.go:154-183`
+
+Validates required fields: `tool` (string) and `inputs` (object).
+
+### Step 3: Preserve HTTP Headers
+
+```go
+if extra := req.GetExtra(); extra != nil && extra.Header != nil {
+    ctx = framework.WithRequestHeaders(ctx, extra.Header)
+}
+```
+
+**Source:** `mcp.go:145-147`
+
+Propagates headers for tool-level authentication (e.g., `Authorization: Bearer <token>`).
+
+### Step 4: Delegate to Executor
+
+```go
+results, err := a.executeTool(ctx, toolName, toolInputs)
+```
+
+**Source:** `mcp.go:189`
+
+Routes through framework engine if available, otherwise directly to executor.
+
+## Phase 3: Executor
+
+**Entry Point:** `core/runtime/executor/executor.go:38`
+
+### Step 1: Find Tool Definition
+
+```go
+var tool *hyperterse.Tool
+for _, t := range e.model.Tools {
+    if t.Name == toolName {
+        tool = t
+        break
+    }
+}
+```
+
+**Source:** `executor.go:47-53`
+
+Returns error if tool not found.
+
+### Step 2: Validate Inputs
+
+```go
+validatedInputs, err := utils.ValidateInputs(tool, userInputs)
+```
+
+**Source:** `executor.go:67-72`
+
+**Validation Rules** (`core/runtime/executor/utils/validator.go`):
+- Required inputs present
+- Type coercion (string → number, etc.)
+- Default values applied
+- Unknown inputs rejected
+
+### Step 3: Substitute Environment Variables
+
+```go
+statementWithEnvVars, err := runtimeutils.SubstituteEnvVars(tool.Statement)
+```
+
+**Source:** `executor.go:83-88`
+
+Replaces `{{ env.DATABASE_URL }}` patterns with environment variable values.
+
+### Step 4: Substitute Input Variables
+
+```go
+finalStatement, err := utils.SubstituteInputs(statementWithEnvVars, validatedInputs, inputTypeMap)
+```
+
+**Source:** `executor.go:91-97`
+
+Replaces `{{ input.user_id }}` patterns with validated input values. Uses type-aware formatting:
+- Strings: single-quoted with escaping
+- Numbers: unquoted
+- Booleans: `true`/`false`
+
+**Implementation:** `core/runtime/executor/utils/substitutor.go`
+
+### Step 5: Check Cache
+
+```go
+cacheEnabled, cacheTTL := e.resolveCachePolicy(tool)
+if cacheEnabled {
+    cacheKey := buildCacheKey(toolName, finalStatement)
+    if cachedResults, found := e.cache.Get(cacheKey); found {
+        return cachedResults, nil
+    }
+}
+```
+
+**Source:** `executor.go:100-109`
+
+Cache key = SHA256(toolName + ":" + finalStatement).
+
+See [Caching](/runtime/caching) for details.
+
+### Step 6: Resolve Adapter
+
+```go
+adapterName := tool.Use[0]
+conn, exists := e.connectorManager.Get(adapterName)
+```
+
+**Source:** `executor.go:119-125`
+
+Retrieves the database connector instance.
+
+### Step 7: Execute Statement
+
+```go
+results, err := conn.Execute(ctx, finalStatement, validatedInputs)
+```
+
+**Source:** `executor.go:143`
+
+The connector:
+1. Accepts the request-scoped context (for cancellation)
+2. Executes the SQL/query against the database
+3. Marshals rows into `[]map[string]any`
+
+**Connector Types:**
+- PostgreSQL: `core/runtime/connectors/postgres.go`
+- MySQL: `core/runtime/connectors/mysql.go`
+- MongoDB: `core/runtime/connectors/mongo.go`
+- Redis: `core/runtime/connectors/redis.go`
+
+### Step 8: Store in Cache
+
+```go
+if cacheEnabled {
+    cacheKey := buildCacheKey(toolName, finalStatement)
+    e.cache.Set(cacheKey, results, cacheTTL)
+}
+```
+
+**Source:** `executor.go:150-153`
+
+Asynchronously writes to Ristretto cache with TTL.
+
+### Step 9: Return Results
+
+```go
+observability.RecordToolExecution(ctx, toolName, true, durationMS)
+return results, nil
+```
+
+**Source:** `executor.go:157-158`
+
+Records metrics and returns `[]map[string]any`.
+
+## Phase 4: Response Serialization
+
+**Handler:** `core/runtime/mcp/mcp.go:226-235`
+
+```go
+func resultPayload(results []map[string]any) *mcpsdk.CallToolResult {
+    resultsJSON, err := json.Marshal(results)
+    return &mcpsdk.CallToolResult{
+        Content: []mcpsdk.Content{
+            &mcpsdk.TextContent{Text: string(resultsJSON)},
+        },
+    }
+}
+```
+
+Serializes result array to JSON string embedded in MCP text content.
+
+## Phase 5: HTTP Response
+
+The MCP SDK handler wraps the result in a JSON-RPC response:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "[{\"id\":\"123\",\"name\":\"John Doe\"}]"
+      }
+    ]
+  }
+}
+```
+
+## Error Propagation
+
+Errors bubble up through the stack:
+
+```
+Connector error
+    ↓
+Executor wraps: "tool execution failed: <error>"
+    ↓
+MCP Adapter converts to error response with code -32603
+    ↓
+MCP SDK wraps in JSON-RPC error structure
+    ↓
+HTTP 200 with isError: true
+```
+
+**Error Codes:**
+- Validation failure → `-32602` (Invalid Params)
+- Tool not found → `-32603` (Internal Error)
+- Execution failure → `-32603` (Internal Error)
+
+**Source:** `core/runtime/mcp/mcp.go:238-254`
+
+## Context Cancellation
+
+The entire pipeline respects context cancellation:
+
+```go
+// Server base context tied to shutdown signal
+BaseContext: func(net.Listener) context.Context { return r.shutdownCtx }
+```
+
+**Source:** `core/runtime/server/server.go:136`
+
+When `shutdownCancel()` is called:
+1. All in-flight request contexts are cancelled
+2. Connector `Execute()` methods abort (if DB driver supports context)
+3. Handlers return promptly
+4. Server drains within shutdown timeout (15s)
+
+**Shutdown Flow:** `core/runtime/server/server.go:245-294`
+
+## Observability Instrumentation
+
+Each phase emits telemetry:
+
+**HTTP Handler:**
+```go
+span.SetAttributes(
+    attribute.String("http.request.method", req.Method),
+    attribute.String("http.route", "/mcp"),
+)
+observability.RecordHTTPRequest(ctx, method, endpoint, statusCode, durationMS)
+```
+
+**Source:** `server.go:349-368`
+
+**Executor:**
+```go
+ctx, span := tracer.Start(ctx, "executor.execute_tool")
+span.SetAttributes(attribute.String("tool.name", toolName))
+observability.RecordToolExecution(ctx, toolName, success, durationMS)
+```
+
+**Source:** `executor.go:40-57`
+
+See [Observability](/runtime/observability) for metrics details.
+
+## Performance Characteristics
+
+**Typical Latency (cached):**
+- MCP overhead: ~1-2ms
+- Cache lookup: ~0.1ms
+- Total: **~2-3ms**
+
+**Typical Latency (uncached):**
+- MCP overhead: ~1-2ms
+- Input validation: ~0.5ms
+- Template substitution: ~0.2ms
+- Database query: **10-100ms** (varies by query)
+- Cache write: ~0.5ms (async)
+- Total: **~12-103ms**
+
+**Concurrency:**
+- Stateless handlers (one goroutine per request)
+- Connector pooling (10-100 connections per adapter)
+- Cache contention: minimal (Ristretto is concurrent)
+
+## Configuration
+
+**Server Timeouts:**
+```yaml
+# In code (not configurable)
+ReadTimeout: 15s
+WriteTimeout: 0  # Unlimited for SSE
+IdleTimeout: 60s
+```
+
+**Cache Policy:**
+```yaml
+tool_defaults:
+  cache:
+    enabled: true
+    ttl: 120  # seconds
+
+tools:
+  - name: get_user
+    cache:
+      enabled: false  # Override default
+```
+
+**Connector Pools:**
+```yaml
+adapters:
+  - name: main_db
+    connector: postgres
+    config:
+      max_open_conns: 25
+      max_idle_conns: 10
+      conn_max_lifetime: 3600
+```

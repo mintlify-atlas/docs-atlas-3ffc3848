@@ -1,0 +1,386 @@
+---
+title: Tool Configuration
+description: Complete reference for tool config.terse files
+---
+
+Tool `config.terse` files define MCP tools that expose functionality to AI agents. Tools can be database-backed (using adapters) or implemented as custom handlers.
+
+## Schema Location
+
+The JSON schema is available at:
+```
+https://raw.githubusercontent.com/hyperterse/hyperterse/refs/heads/main/schema/tool.terse.schema.json
+```
+
+## File Location
+
+Tool configurations are located in `config.terse` files within tool directories:
+
+```
+project/
+├── .hyperterse
+└── app/
+    └── tools/
+        ├── get-user/
+        │   ├── config.terse
+        │   ├── user-input-validator.ts
+        │   └── user-data-mapper.ts
+        └── get-weather/
+            ├── config.terse
+            └── weather-handler.ts
+```
+
+## Configuration Examples
+
+### Database-Backed Tool
+
+```yaml
+description: "Get user by id, with input validation and response mapping."
+use: my-adapter
+statement: |
+  SELECT * FROM users WHERE id = {{ inputs.userId }}
+inputs:
+  userId:
+    type: int
+    description: "User ID to fetch."
+mappers:
+  input: "./user-input-validator.ts"
+  output: "./user-data-mapper.ts"
+auth:
+  plugin: allow_all
+```
+
+### Custom Handler Tool
+
+```yaml
+description: "Custom weather MCP tool implemented entirely in TypeScript handler."
+handler: "./weather-handler.ts"
+auth:
+  plugin: allow_all
+```
+
+### Tool with Optional Inputs
+
+```yaml
+description: "Search users with optional filters."
+use: users-db
+statement: |
+  SELECT * FROM users 
+  WHERE 1=1
+  {{ if inputs.status }}
+    AND status = {{ inputs.status }}
+  {{ end }}
+  {{ if inputs.email }}
+    AND email LIKE {{ inputs.email }}
+  {{ end }}
+inputs:
+  status:
+    type: string
+    description: "Filter by user status"
+    optional: true
+  email:
+    type: string
+    description: "Filter by email pattern"
+    optional: true
+```
+
+## Configuration Fields
+
+<ParamField path="description" type="string">
+  Tool description exposed through MCP `tools/list`. This helps AI agents understand what the tool does.
+  
+  ```yaml
+  description: "Get user by id, with input validation and response mapping."
+  ```
+</ParamField>
+
+<ParamField path="name" type="string">
+  Optional explicit MCP tool name. When omitted, the tool name defaults to the directory name.
+  
+  **Pattern:** `^[a-z][a-z0-9_-]*$`
+  
+  Must start with a lowercase letter and contain only lowercase letters, numbers, hyphens, and underscores.
+  
+  ```yaml
+  name: get-user-by-id
+  ```
+</ParamField>
+
+### Database-Backed Tools
+
+<ParamField path="use" type="string">
+  Adapter binding for DB-backed tools. References an adapter name defined in the adapters directory.
+  
+  **Required for database-backed tools** (unless `handler` is specified).
+  
+  ```yaml
+  use: my-adapter
+  ```
+</ParamField>
+
+<ParamField path="statement" type="string">
+  SQL or query statement for DB-backed tools. Supports template syntax for input substitution.
+  
+  **Template syntax:** `{{ inputs.fieldName }}`
+  
+  ```yaml
+  statement: |
+    SELECT * FROM users WHERE id = {{ inputs.userId }}
+  ```
+  
+  <Note>
+    Use multi-line YAML syntax (`|`) for complex queries with multiple lines.
+  </Note>
+</ParamField>
+
+### Custom Handler Tools
+
+<ParamField path="handler" type="string">
+  Custom tool handler script path for code-based tools. Path is relative to the tool directory.
+  
+  **Required for custom tools** (unless `use` is specified).
+  
+  ```yaml
+  handler: "./weather-handler.ts"
+  ```
+  
+  The handler must export a default function:
+  ```typescript
+  export default async function handler(inputs: any) {
+    // Custom logic here
+    return { result: "data" };
+  }
+  ```
+</ParamField>
+
+### Input Configuration
+
+<ParamField path="inputs" type="object">
+  Define tool input parameters with type validation and descriptions.
+  
+  **Format:** Object with parameter names as keys
+  
+  <Expandable title="Input Parameter Properties">
+    Each input parameter has the following properties:
+    
+    <ParamField path="inputs.{name}.type" type="string" required>
+      Input data type.
+      
+      **Allowed values:**
+      - `string` - Text value
+      - `int` - Integer number
+      - `float` - Floating-point number
+      - `boolean` - True/false value
+      - `datetime` - Date and time value
+      
+      ```yaml
+      inputs:
+        userId:
+          type: int
+      ```
+    </ParamField>
+    
+    <ParamField path="inputs.{name}.description" type="string">
+      Description of the input parameter, shown to AI agents.
+      
+      ```yaml
+      inputs:
+        userId:
+          type: int
+          description: "User ID to fetch."
+      ```
+    </ParamField>
+    
+    <ParamField path="inputs.{name}.optional" type="boolean" default="false">
+      Whether the input is optional. Required inputs must be provided by the caller.
+      
+      ```yaml
+      inputs:
+        status:
+          type: string
+          optional: true
+      ```
+    </ParamField>
+    
+    <ParamField path="inputs.{name}.default" type="string | number | boolean">
+      Default value when input is not provided. Type must match the configured `type`.
+      
+      ```yaml
+      inputs:
+        limit:
+          type: int
+          default: 10
+          optional: true
+        active:
+          type: boolean
+          default: true
+          optional: true
+      ```
+    </ParamField>
+  </Expandable>
+  
+  **Complete example:**
+  ```yaml
+  inputs:
+    userId:
+      type: int
+      description: "User ID to fetch."
+    includeDeleted:
+      type: boolean
+      description: "Include deleted users"
+      optional: true
+      default: false
+  ```
+</ParamField>
+
+### Mappers
+
+<ParamField path="mappers" type="object">
+  Optional mapper script paths for tool input/output transforms. Paths are relative to the tool directory.
+  
+  <Expandable title="Mapper Properties">
+    <ParamField path="mappers.input" type="string">
+      Input mapper script path. Transforms and validates inputs before execution.
+      
+      ```yaml
+      mappers:
+        input: "./user-input-validator.ts"
+      ```
+      
+      The mapper must export a default function:
+      ```typescript
+      export default function inputMapper(inputs: any) {
+        // Validate and transform inputs
+        return inputs;
+      }
+      ```
+    </ParamField>
+    
+    <ParamField path="mappers.output" type="string">
+      Output mapper script path. Transforms results before returning to the caller.
+      
+      ```yaml
+      mappers:
+        output: "./user-data-mapper.ts"
+      ```
+      
+      The mapper must export a default function:
+      ```typescript
+      export default function outputMapper(result: any) {
+        // Transform result
+        return result;
+      }
+      ```
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### Authentication
+
+<ParamField path="auth" type="object">
+  Optional tool auth plugin configuration.
+  
+  <Expandable title="Auth Properties">
+    <ParamField path="auth.plugin" type="string">
+      Authentication plugin name.
+      
+      ```yaml
+      auth:
+        plugin: allow_all
+      ```
+    </ParamField>
+    
+    <ParamField path="auth.policy" type="object">
+      Policy configuration as key-value pairs.
+      
+      ```yaml
+      auth:
+        plugin: custom_auth
+        policy:
+          required_role: admin
+          scope: users:read
+      ```
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+## Tool Types
+
+Tools must be **either** database-backed **or** custom handler, not both:
+
+### Database-Backed Tool Requirements
+- `use` field is required
+- `statement` field typically used (optional)
+- References an adapter for database access
+
+### Custom Handler Tool Requirements
+- `handler` field is required
+- Points to a TypeScript file with custom implementation
+- Does not use `use` or `statement` fields
+
+## Tool Naming
+
+Tool names are determined in the following order:
+
+1. **Explicit `name` field** - If specified in configuration
+2. **Directory name** - The tool directory name
+
+### Examples
+
+**Directory:** `app/tools/get-user/`
+```yaml
+description: "Get user"
+use: users-db
+```
+**Tool name:** `get-user`
+
+---
+
+**Directory:** `app/tools/fetch-data/`
+```yaml
+name: get-analytics-data
+description: "Fetch analytics"
+handler: "./handler.ts"
+```
+**Tool name:** `get-analytics-data`
+
+## Template Syntax in Statements
+
+Database statements support template substitution:
+
+```yaml
+statement: |
+  SELECT * FROM users 
+  WHERE id = {{ inputs.userId }}
+  {{ if inputs.includeDeleted }}
+    -- Include deleted users
+  {{ else }}
+    AND deleted_at IS NULL
+  {{ end }}
+```
+
+## IDE Integration
+
+Enable schema validation:
+
+```yaml
+# yaml-language-server: $schema=https://raw.githubusercontent.com/hyperterse/hyperterse/refs/heads/main/schema/tool.terse.schema.json
+
+description: "Get user by id"
+use: my-adapter
+statement: SELECT * FROM users WHERE id = {{ inputs.userId }}
+```
+
+## Validation Rules
+
+- Tool must have either `use` or `handler`, not both
+- Input names must match pattern `^[a-zA-Z][a-zA-Z0-9_-]*$`
+- Input `type` must be one of: `string`, `int`, `float`, `boolean`, `datetime`
+- Input `default` type must match declared `type`
+- `name` pattern must match `^[a-z][a-z0-9_-]*$` if specified
+
+## Related
+
+- [Adapter Configuration](/reference/adapter-config) - Configure database adapters
+- [Root Configuration](/reference/root-config) - Configure tool discovery directory
+- [Environment Variables](/reference/environment-variables) - Use environment variables in configuration

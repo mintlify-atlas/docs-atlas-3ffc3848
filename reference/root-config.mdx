@@ -1,0 +1,261 @@
+---
+title: Root Configuration
+description: Complete reference for the .hyperterse root configuration file
+---
+
+The `.hyperterse` file defines project-level settings including server configuration, build settings, and directory structure for adapters and tools.
+
+## Schema Location
+
+The JSON schema is available at:
+```
+https://raw.githubusercontent.com/hyperterse/hyperterse/refs/heads/main/schema/root.terse.schema.json
+```
+
+## Complete Configuration Example
+
+```yaml
+name: demo-framework
+version: 2.0.0-beta-1
+
+root: app
+
+build:
+  out: dist
+  clean_dir: true
+
+server:
+  port: 8080
+  log_level: 3
+
+tools:
+  directory: tools
+  search:
+    limit: 10
+  cache:
+    enabled: true
+    ttl: 3600
+
+adapters:
+  directory: adapters
+```
+
+## Configuration Fields
+
+### Project Metadata
+
+<ParamField path="name" type="string" required>
+  Project name. Must start with a lowercase letter and contain only lowercase letters, numbers, hyphens, and underscores.
+  
+  **Pattern:** `^[a-z][a-z0-9_-]*$`
+  
+  ```yaml
+  name: my-project
+  ```
+</ParamField>
+
+<ParamField path="version" type="string">
+  Optional project version for observability metadata. Can be any string following semantic versioning conventions.
+  
+  ```yaml
+  version: 2.0.0-beta-1
+  ```
+</ParamField>
+
+<ParamField path="root" type="string" default="app">
+  Base directory for discovery of adapters and tools. All relative paths are resolved from this directory.
+  
+  ```yaml
+  root: app
+  ```
+</ParamField>
+
+### Build Configuration
+
+<ParamField path="build" type="object">
+  Optional build configuration for the `hyperterse build` command.
+  
+  <Expandable title="Build Properties">
+    <ParamField path="build.out" type="string">
+      Build output directory where the compiled `model.bin` manifest will be written.
+      
+      ```yaml
+      build:
+        out: dist
+      ```
+    </ParamField>
+    
+    <ParamField path="build.out_dir" type="string">
+      Alias for `build.out`. Use either `out` or `out_dir`, not both.
+      
+      ```yaml
+      build:
+        out_dir: build
+      ```
+    </ParamField>
+    
+    <ParamField path="build.clean_dir" type="boolean" default="false">
+      Whether to clean the output directory before building.
+      
+      ```yaml
+      build:
+        clean_dir: true
+      ```
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### Server Configuration
+
+<ParamField path="server" type="object">
+  Runtime server configuration.
+  
+  <Expandable title="Server Properties">
+    <ParamField path="server.port" type="integer | string" default="8080">
+      Server port. Can be specified as an integer (1-65535) or string. Can be overridden by the `PORT` environment variable or `--port` CLI flag.
+      
+      **Range:** 1-65535
+      
+      ```yaml
+      server:
+        port: 8080
+      ```
+    </ParamField>
+    
+    <ParamField path="server.log_level" type="integer" default="3">
+      Log level for server output. Can be overridden by `--log-level` or `--verbose` CLI flags.
+      
+      **Values:**
+      - `1` - ERROR
+      - `2` - WARN
+      - `3` - INFO
+      - `4` - DEBUG
+      
+      ```yaml
+      server:
+        log_level: 3
+      ```
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### Tools Configuration
+
+<ParamField path="tools" type="object">
+  Tool discovery and global tool cache/search settings.
+  
+  <Expandable title="Tools Properties">
+    <ParamField path="tools.directory" type="string" default="tools">
+      Tools directory relative to `root`. The framework will discover all tool configurations in this directory.
+      
+      ```yaml
+      tools:
+        directory: tools
+      ```
+    </ParamField>
+    
+    <ParamField path="tools.search" type="object">
+      Global/default MCP tool search configuration.
+      
+      <Expandable title="Search Properties">
+        <ParamField path="tools.search.limit" type="integer" default="10">
+          Maximum number of MCP search results returned.
+          
+          **Minimum:** 1
+          
+          ```yaml
+          tools:
+            search:
+              limit: 10
+          ```
+        </ParamField>
+      </Expandable>
+    </ParamField>
+    
+    <ParamField path="tools.cache" type="object">
+      Global/default tool cache configuration.
+      
+      <Expandable title="Cache Properties">
+        <ParamField path="tools.cache.enabled" type="boolean">
+          Whether to enable tool result caching.
+          
+          ```yaml
+          tools:
+            cache:
+              enabled: true
+          ```
+        </ParamField>
+        
+        <ParamField path="tools.cache.ttl" type="integer">
+          Cache time-to-live in seconds.
+          
+          **Minimum:** 1
+          
+          ```yaml
+          tools:
+            cache:
+              ttl: 3600
+          ```
+        </ParamField>
+      </Expandable>
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### Adapters Configuration
+
+<ParamField path="adapters" type="object">
+  Adapter discovery settings.
+  
+  <Expandable title="Adapters Properties">
+    <ParamField path="adapters.directory" type="string" default="adapters">
+      Adapters directory relative to `root`. The framework will discover all adapter `.terse` files in this directory.
+      
+      ```yaml
+      adapters:
+        directory: adapters
+      ```
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+## Configuration Precedence
+
+Configuration values follow this precedence order (highest to lowest):
+
+1. **CLI flags** - `--port`, `--log-level`, `--verbose`
+2. **Environment variables** - `PORT`, `HYPERTERSE_LOG_TAGS`
+3. **`.hyperterse` file** - Configuration in the root config file
+4. **Default values** - Built-in framework defaults
+
+## Minimal Configuration
+
+The only required field is `name`:
+
+```yaml
+name: my-project
+```
+
+All other fields have sensible defaults:
+- `root: "app"`
+- `server.port: 8080`
+- `server.log_level: 3` (INFO)
+- `tools.directory: "tools"`
+- `adapters.directory: "adapters"`
+
+## IDE Integration
+
+To enable schema validation and autocomplete in your editor, add the schema reference at the top of your `.hyperterse` file:
+
+```yaml
+# yaml-language-server: $schema=https://raw.githubusercontent.com/hyperterse/hyperterse/refs/heads/main/schema/root.terse.schema.json
+
+name: my-project
+version: 1.0.0
+```
+
+## Related
+
+- [Adapter Configuration](/reference/adapter-config) - Configure database adapters
+- [Tool Configuration](/reference/tool-config) - Configure MCP tools
+- [Environment Variables](/reference/environment-variables) - Override configuration with environment variables

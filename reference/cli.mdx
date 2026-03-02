@@ -1,0 +1,650 @@
+---
+title: CLI Reference
+description: Complete reference for all Hyperterse CLI commands, flags, and options
+---
+
+The Hyperterse CLI provides commands for initializing projects, running servers, building artifacts, and managing your installation.
+
+## Installation
+
+```bash
+curl -fsSL https://hyperterse.com/install | bash
+```
+
+## Root Command
+
+### hyperterse
+
+The base command displays help information when called without subcommands.
+
+**Syntax:**
+```bash
+hyperterse [flags]
+```
+
+**Flags:**
+
+<ParamField path="--version" type="boolean" default="false">
+  Print the installed version and exit. Short flag: `-v`
+</ParamField>
+
+**Example:**
+```bash
+$ hyperterse --version
+1.0.0
+```
+
+---
+
+## Project Initialization
+
+### hyperterse init
+
+Initialize a new Hyperterse project with configuration files and scaffolding.
+
+**Syntax:**
+```bash
+hyperterse init [folder-name] [flags]
+```
+
+**Arguments:**
+
+<ParamField path="folder-name" type="string" default="">
+  Name of the folder to create for the project. If not provided, prompts interactively. Use `.` for current directory.
+</ParamField>
+
+**Flags:**
+
+<ParamField path="--output" type="string" default="<folder>/.hyperterse">
+  Output file path for the configuration. Short flag: `-o`
+</ParamField>
+
+**Example:**
+```bash
+$ hyperterse init my-project
+✓ Created configuration file: my-project/.hyperterse
+✓ Created tool config: my-project/app/tools/hello-world/config.terse
+✓ Created agent skill: my-project/.agent/skills/hyperterse-docs/SKILL.md
+
+Next steps:
+  1. Edit my-project/.hyperterse and add tools under my-project/app/tools
+  2. Add adapters in my-project/app/adapters/ when you need database connections
+  3. Run: hyperterse start -f my-project/.hyperterse
+```
+
+**Generated Files:**
+
+The `init` command creates:
+- `.hyperterse` - Root configuration file
+- `app/tools/hello-world/config.terse` - Example tool configuration
+- `app/tools/hello-world/handler.ts` - Example TypeScript handler
+- `.agent/skills/hyperterse-docs/SKILL.md` - Agent skill for documentation
+
+---
+
+## Development Server
+
+### hyperterse start
+
+Run the Hyperterse server from configuration files.
+
+**Syntax:**
+```bash
+hyperterse start [path] [flags]
+```
+
+**Arguments:**
+
+<ParamField path="path" type="string" default="">
+  Path to configuration file or directory containing `.hyperterse`. If directory, uses `<path>/.hyperterse`. Cannot be combined with `--file` or `--source`.
+</ParamField>
+
+**Flags:**
+
+<ParamField path="--file" type="string" default=".hyperterse">
+  Path to the configuration file (`.hyperterse` or `.terse`). Short flag: `-f`
+</ParamField>
+
+<ParamField path="--source" type="string" default="">
+  Configuration as a string (alternative to `--file`). Short flag: `-s`
+</ParamField>
+
+<ParamField path="--port" type="string" default="">
+  Server port (overrides config file and `PORT` env var). Short flag: `-p`
+</ParamField>
+
+<ParamField path="--log-level" type="integer" default="0">
+  Log level: `1`=ERROR, `2`=WARN, `3`=INFO, `4`=DEBUG. Overrides config file. Default: `3` (INFO)
+</ParamField>
+
+<ParamField path="--verbose" type="boolean" default="false">
+  Enable verbose logging (sets log level to DEBUG)
+</ParamField>
+
+<ParamField path="--log-tags" type="string" default="">
+  Filter logs by tags (comma-separated, use `-tag` to exclude). Overrides `HYPERTERSE_LOG_TAGS` env var
+</ParamField>
+
+<ParamField path="--log-file" type="boolean" default="false">
+  Stream logs to file in `/tmp/.hyperterse/logs/`
+</ParamField>
+
+<ParamField path="--watch" type="boolean" default="false">
+  Watch `.terse/.ts` files and hot-reload on changes. Cannot be used with `--source`.
+</ParamField>
+
+**Examples:**
+
+```bash
+# Start with default config (.hyperterse in current directory)
+$ hyperterse start
+[INFO] Configuration loaded
+[INFO] Validation successful
+[INFO] Runtime initialized
+[INFO] Server listening on :8080
+```
+
+```bash
+# Start from specific directory
+$ hyperterse start my-project
+[INFO] Configuration loaded
+[INFO] Server listening on :8080
+```
+
+```bash
+# Start with custom port and verbose logging
+$ hyperterse start --port 3000 --verbose
+[DEBUG] Adapters: 2
+[DEBUG]   Adapter: main-db (postgres)
+[DEBUG]   Adapter: cache (redis)
+[DEBUG] Tools: 3
+[INFO] Server listening on :3000
+```
+
+```bash
+# Start with watch mode for hot-reload
+$ hyperterse start --watch
+[INFO] Watching .hyperterse and app/** for changes
+[INFO] Server listening on :8080
+[INFO] Changes detected, reloading
+[INFO] Server reloaded successfully
+```
+
+```bash
+# Start with inline configuration
+$ hyperterse start --source 'name: test\nserver:\n  port: 8080'
+[INFO] Configuration loaded
+[INFO] Server listening on :8080
+```
+
+**Environment Variables:**
+
+The `start` command loads environment variables from `.env` files in this priority order:
+1. From the config file directory (if `--file` is provided)
+2. From the current working directory
+3. From the directory containing the executable binary
+
+Files checked: `.env.local`, `.env.development`, `.env`
+
+---
+
+## Building and Deployment
+
+### hyperterse build
+
+Build bundles and a model manifest for deployment.
+
+**Syntax:**
+```bash
+hyperterse build [path] [flags]
+```
+
+**Arguments:**
+
+<ParamField path="path" type="string" default="">
+  Path to configuration file or directory containing `.hyperterse`. Cannot be combined with `--file`.
+</ParamField>
+
+**Flags:**
+
+<ParamField path="--file" type="string" default=".hyperterse">
+  Path to the configuration file. Short flag: `-f`
+</ParamField>
+
+<ParamField path="--out" type="string" default="dist">
+  Output directory for build artifacts. Short flag: `-o`
+</ParamField>
+
+<ParamField path="--clean-dir" type="boolean" default="false">
+  Clean output directory before building
+</ParamField>
+
+**Example:**
+```bash
+$ hyperterse build
+[INFO] Configuration loaded
+[INFO] Validation successful
+[SUCCESS] Build artifacts written to /path/to/dist
+[INFO] Run: cd dist && ./hyperterse serve
+[INFO] Manifest: /path/to/dist/model.bin
+[INFO] Bundles: /path/to/dist/build
+```
+
+```bash
+# Build with custom output directory and clean
+$ hyperterse build --out production --clean-dir
+[SUCCESS] Build artifacts written to /path/to/production
+```
+
+**Build Output:**
+
+The `build` command creates:
+- `hyperterse` (or `hyperterse.exe` on Windows) - Executable binary
+- `model.bin` - Serialized model manifest
+- `build/` - Bundled JavaScript artifacts (if tools use TypeScript/JavaScript)
+
+---
+
+### hyperterse serve
+
+Serve a built Hyperterse model manifest (created by `hyperterse build`).
+
+**Syntax:**
+```bash
+hyperterse serve [manifest-or-dir] [flags]
+```
+
+**Arguments:**
+
+<ParamField path="manifest-or-dir" type="string" default="model.bin">
+  Path to model manifest file or directory containing `model.bin`. Cannot be combined with `--file`.
+</ParamField>
+
+**Flags:**
+
+<ParamField path="--file" type="string" default="./model.bin">
+  Path to the model manifest file. Short flag: `-f`
+</ParamField>
+
+<ParamField path="--port" type="string" default="">
+  Server port (overrides manifest and `PORT` env var). Short flag: `-p`
+</ParamField>
+
+<ParamField path="--log-level" type="integer" default="0">
+  Log level: `1`=ERROR, `2`=WARN, `3`=INFO, `4`=DEBUG. Overrides manifest.
+</ParamField>
+
+<ParamField path="--verbose" type="boolean" default="false">
+  Enable verbose logging (sets log level to DEBUG)
+</ParamField>
+
+<ParamField path="--log-tags" type="string" default="">
+  Filter logs by tags (comma-separated, use `-tag` to exclude). Overrides `HYPERTERSE_LOG_TAGS` env var
+</ParamField>
+
+<ParamField path="--log-file" type="boolean" default="false">
+  Stream logs to file in `/tmp/.hyperterse/logs/`
+</ParamField>
+
+**Examples:**
+
+```bash
+# Serve from default location
+$ hyperterse serve
+[INFO] Manifest loaded
+[INFO] Validation successful
+[INFO] Runtime initialized
+[INFO] Server listening on :8080
+```
+
+```bash
+# Serve from build directory
+$ cd dist && ./hyperterse serve
+[INFO] Server listening on :8080
+```
+
+```bash
+# Serve with custom port
+$ hyperterse serve dist --port 9000
+[INFO] Server listening on :9000
+```
+
+---
+
+## Validation and Testing
+
+### hyperterse validate
+
+Validate a Hyperterse project or configuration.
+
+**Syntax:**
+```bash
+hyperterse validate [path] [flags]
+```
+
+**Arguments:**
+
+<ParamField path="path" type="string" default="">
+  Path to configuration file or directory containing `.hyperterse`. Cannot be combined with `--file` or `--source`.
+</ParamField>
+
+**Flags:**
+
+<ParamField path="--file" type="string" default=".hyperterse">
+  Path to the configuration file. Short flag: `-f`
+</ParamField>
+
+<ParamField path="--source" type="string" default="">
+  Configuration as a string (alternative to `--file`). Short flag: `-s`
+</ParamField>
+
+**Example:**
+```bash
+$ hyperterse validate
+[INFO] Validation report:
+[INFO]   root config: .hyperterse
+[INFO]   app directory: /path/to/app
+[INFO]   adapter directory: /path/to/app/adapters
+[INFO]   tools directory: /path/to/app/tools
+[INFO]   adapter files (1):
+[INFO]     - app/adapters/main-db.terse
+[INFO]   tools (2):
+[INFO]     - tool: get-user
+[INFO]       config: app/tools/get-user/config.terse
+[INFO]       adapters: main-db
+[INFO]     - tool: hello-world
+[INFO]       config: app/tools/hello-world/config.terse
+[INFO]       adapters: none (script-only tool)
+[INFO]       handler: app/tools/hello-world/handler.ts -> bundled as handler.js
+[INFO]   vendor bundle validated: yes
+[INFO]   tool bundles validated: 1
+[SUCCESS] Configuration is valid: .hyperterse
+```
+
+```bash
+# Validate inline configuration
+$ hyperterse validate --source 'name: test'
+[SUCCESS] Configuration is valid: source
+```
+
+**Validation Checks:**
+
+The `validate` command:
+- Parses configuration files for syntax errors
+- Validates schema and data types
+- Checks adapter configurations
+- Validates tool definitions and inputs
+- Bundles TypeScript/JavaScript files to verify dependencies
+- Verifies file paths and references
+
+---
+
+## Upgrade and Maintenance
+
+### hyperterse upgrade
+
+Upgrade Hyperterse to the latest version.
+
+**Syntax:**
+```bash
+hyperterse upgrade [flags]
+```
+
+**Flags:**
+
+<ParamField path="--prerelease" type="boolean" default="false">
+  Include pre-releases when finding the latest version. Auto-detected if current version is a prerelease.
+</ParamField>
+
+<ParamField path="--major" type="string" default="">
+  Upgrade to a specific major version (e.g., `"2"`) or use `"next"` to upgrade to the next major version. Defaults to current major version.
+</ParamField>
+
+**Examples:**
+
+```bash
+# Upgrade to latest version in current major
+$ hyperterse upgrade
+Current version: 1.2.3
+Staying on major version: 1
+Latest version in major version 1: 1.5.0
+Downloading from: https://github.com/hyperterse/hyperterse/releases/download/v1.5.0/hyperterse-linux-amd64
+Successfully upgraded to 1.5.0
+```
+
+```bash
+# Upgrade to next major version
+$ hyperterse upgrade --major next
+Current version: 1.2.3
+Upgrading to next major version: 2
+Latest version in major version 2: 2.0.0
+Successfully upgraded to 2.0.0
+```
+
+```bash
+# Include prereleases
+$ hyperterse upgrade --prerelease
+Current version: 1.2.3
+Staying on major version: 1
+Latest version in major version 1: 1.6.0-beta.1
+Successfully upgraded to 1.6.0-beta.1
+```
+
+**Upgrade Behavior:**
+
+- Downloads binary from GitHub releases
+- Replaces the current executable in place
+- Maintains the same installation path
+- Auto-detects OS and architecture
+- Follows semantic versioning rules
+- Defaults to current major version unless `--major` is specified
+
+---
+
+## Shell Completion
+
+### hyperterse completion
+
+Generate shell completion script. This command is hidden and used internally by the install script.
+
+**Syntax:**
+```bash
+hyperterse completion [shell]
+```
+
+**Arguments:**
+
+<ParamField path="shell" type="string" required>
+  Shell type: `bash`, `zsh`, `fish`, or `powershell`
+</ParamField>
+
+**Example:**
+```bash
+# Generate bash completion
+$ hyperterse completion bash > /etc/bash_completion.d/hyperterse
+```
+
+---
+
+## Common Workflows
+
+### Development Workflow
+
+```bash
+# Initialize project
+hyperterse init my-mcp-server
+cd my-mcp-server
+
+# Edit configuration
+vim .hyperterse
+
+# Validate configuration
+hyperterse validate
+
+# Run with hot reload during development
+hyperterse start --watch --verbose
+```
+
+### Build and Deploy Workflow
+
+```bash
+# Validate before building
+hyperterse validate
+
+# Build production artifacts
+hyperterse build --out dist --clean-dir
+
+# Test the build
+cd dist
+./hyperterse serve --port 8080
+
+# Deploy (copy dist/ to production server)
+scp -r dist/ user@server:/opt/hyperterse/
+ssh user@server
+cd /opt/hyperterse/dist
+./hyperterse serve
+```
+
+### Testing Tools
+
+```bash
+# Start server
+hyperterse start &
+
+# Test heartbeat
+curl http://localhost:8080/heartbeat
+
+# List tools via MCP
+curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "method": "tools/list",
+    "id": 1
+  }'
+
+# Call a tool
+curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "method": "tools/call",
+    "params": {
+      "name": "hello-world",
+      "arguments": {
+        "name": "Alice"
+      }
+    },
+    "id": 2
+  }'
+```
+
+---
+
+## Environment Variables
+
+### Configuration
+
+<ParamField path="PORT" type="string">
+  Server port. Overridden by `--port` flag and config file `server.port`.
+</ParamField>
+
+<ParamField path="HYPERTERSE_LOG_TAGS" type="string">
+  Filter logs by tags (comma-separated). Use `-tag` to exclude tags. Overridden by `--log-tags` flag.
+</ParamField>
+
+### Environment Files
+
+Hyperterse automatically loads environment variables from these files (in priority order):
+- `.env.local`
+- `.env.development`
+- `.env`
+
+System environment variables always take precedence over `.env` file values.
+
+---
+
+## Exit Codes
+
+| Code | Description |
+|------|-------------|
+| 0 | Success |
+| 1 | General error (invalid config, validation failure, runtime error) |
+
+---
+
+## Log Levels
+
+Log levels can be set via `--log-level` flag or `server.log_level` in config:
+
+| Level | Value | Description |
+|-------|-------|-------------|
+| ERROR | 1 | Only error messages |
+| WARN | 2 | Warnings and errors |
+| INFO | 3 | Informational, warnings, and errors (default) |
+| DEBUG | 4 | All messages including debug output |
+
+Use `--verbose` flag as a shortcut for `--log-level 4`.
+
+---
+
+## Log Filtering
+
+Filter logs by tags using `--log-tags` or `HYPERTERSE_LOG_TAGS`:
+
+```bash
+# Only show logs with 'start' tag
+hyperterse start --log-tags start
+
+# Exclude 'watch' tag
+hyperterse start --watch --log-tags -watch
+
+# Multiple filters (comma-separated)
+hyperterse start --log-tags main,runtime,-debug
+```
+
+---
+
+## File Paths
+
+### Relative vs Absolute Paths
+
+- **CLI-provided paths**: Relative to current working directory
+- **Config-provided paths**: Relative to config file directory
+- **Absolute paths**: Used as-is
+
+### Special Path Handling
+
+- Use `.` as folder name in `init` to initialize in current directory
+- `build --out` creates directory if it doesn't exist
+- `serve` accepts directory and automatically looks for `model.bin`
+
+---
+
+## Platform Support
+
+| Platform | Architecture | Binary Name |
+|----------|--------------|-------------|
+| Linux | amd64 | `hyperterse-linux-amd64` |
+| Linux | arm64 | `hyperterse-linux-arm64` |
+| macOS | amd64 | `hyperterse-darwin-amd64` |
+| macOS | arm64 | `hyperterse-darwin-arm64` |
+| Windows | amd64 | `hyperterse-windows-amd64.exe` |
+| Windows | arm64 | `hyperterse-windows-arm64.exe` |
+
+---
+
+## Getting Help
+
+All commands support `--help` flag:
+
+```bash
+hyperterse --help
+hyperterse start --help
+hyperterse build --help
+```
+
+For more information, visit:
+- **Documentation**: https://docs.hyperterse.com
+- **GitHub**: https://github.com/hyperterse/hyperterse
+- **Website**: https://hyperterse.com

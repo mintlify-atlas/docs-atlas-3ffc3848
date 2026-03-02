@@ -1,80 +1,338 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quickstart
+description: Build your first MCP server with Hyperterse in minutes. Learn the basics of tool configuration, adapters, and the MCP protocol.
 ---
 
-## Get started in three steps
+# Quickstart
 
-Get your documentation site running locally and make your first customization.
+This guide will walk you through creating your first Hyperterse MCP server, from initialization to making your first MCP request.
 
-### Step 1: Set up your local environment
+## Initialize a project
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+<Steps>
+  <Step title="Create a new project">
+    Run the init command to scaffold a starter project:
 
-### Step 2: Deploy your changes
+    ```bash
+    hyperterse init
+    ```
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    This creates the following structure:
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+    ```text
+    my-project/
+      .hyperterse
+      app/
+        adapters/
+          my-database.terse
+        tools/
+          hello-world/
+            config.terse
+            user-data-mapper.ts
+    ```
+  </Step>
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+  <Step title="Understand the project structure">
+    Hyperterse uses a convention-based structure:
 
-### Step 3: Go live
+    - **`.hyperterse`** - Root configuration file with server settings
+    - **`app/adapters/`** - Database adapter configurations
+    - **`app/tools/`** - Tool definitions (each tool in its own folder)
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+    <Tip>
+    Each tool folder must contain a `config.terse` file. Optional TypeScript files can be added for custom logic.
+    </Tip>
+  </Step>
+
+  <Step title="Examine the root config">
+    The `.hyperterse` file defines your server configuration:
+
+    ```yaml .hyperterse
+    name: demo-framework
+    version: 2.0.0-beta-1
+
+    server:
+      port: 8080
+      log_level: 3
+    ```
+
+    This sets up an MCP server running on port 8080.
+  </Step>
+
+  <Step title="Check the adapter config">
+    Adapters connect to your data sources. Here's the Postgres adapter:
+
+    ```yaml app/adapters/my-adapter.terse
+    connector: postgres
+    connection_string: postgresql://demo:demo@localhost:5432/demo
+    options:
+      sslmode: disable
+    ```
+
+    <Note>
+    Update the connection string to match your database credentials. You can also skip database setup and use script-backed tools instead.
+    </Note>
+  </Step>
+
+  <Step title="Review the scaffolded tool">
+    The init command creates a sample tool at `app/tools/hello-world/config.terse`:
+
+    ```yaml app/tools/hello-world/config.terse
+    description: "Get user by id, with input validation and response mapping."
+    use: my-adapter
+    statement: |
+      SELECT * FROM users WHERE id = {{ inputs.userId }}
+    inputs:
+      userId:
+        type: int
+        description: "User ID to fetch."
+    mappers:
+      input: "./user-input-validator.ts"
+      output: "./user-data-mapper.ts"
+    auth:
+      plugin: allow_all
+    ```
+
+    This tool queries a database using the `my-adapter` connection, validates inputs, and transforms outputs.
+  </Step>
+</Steps>
+
+## Start the server
+
+<Steps>
+  <Step title="Run the development server">
+    Start Hyperterse with:
+
+    ```bash
+    hyperterse start
+    ```
+
+    For automatic reloading during development:
+
+    ```bash
+    hyperterse start --watch
+    ```
+
+    You should see output indicating the server is running on `http://localhost:8080`.
+  </Step>
+
+  <Step title="Test the heartbeat endpoint">
+    Verify the server is running:
+
+    ```bash
+    curl http://localhost:8080/heartbeat
+    ```
+
+    You should receive a 200 OK response.
+  </Step>
+</Steps>
+
+## Make MCP requests
+
+<Steps>
+  <Step title="List available tools">
+    Use the MCP `tools/list` method to see all registered tools:
+
+    ```bash
+    curl -X POST http://localhost:8080/mcp \
+      -H "Content-Type: application/json" \
+      -d '{
+        "jsonrpc": "2.0",
+        "method": "tools/list",
+        "id": 1
+      }'
+    ```
+
+    Response:
+
+    ```json
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "tools": [
+          {
+            "name": "hello-world",
+            "description": "Get user by id, with input validation and response mapping.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "userId": {
+                  "type": "integer",
+                  "description": "User ID to fetch."
+                }
+              },
+              "required": ["userId"]
+            }
+          }
+        ]
+      }
+    }
+    ```
+  </Step>
+
+  <Step title="Call a tool">
+    Invoke the `hello-world` tool using the `tools/call` method:
+
+    ```bash
+    curl -X POST http://localhost:8080/mcp \
+      -H "Content-Type: application/json" \
+      -d '{
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "name": "hello-world",
+          "arguments": {
+            "userId": 1
+          }
+        },
+        "id": 2
+      }'
+    ```
+
+    Response:
+
+    ```json
+    {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "[{\"trace_id\":\"a1b2c3d4...\",\"id\":1,\"name\":\"John Doe\",\"email\":\"john@example.com\",\"created_at_iso\":\"2024-01-15T10:30:00.000Z\"}]"
+          }
+        ]
+      }
+    }
+    ```
+
+    <Note>
+    This assumes you have a `users` table with the appropriate schema. If you don't have a database set up, create a script-backed tool instead.
+    </Note>
+  </Step>
+</Steps>
+
+## Create a custom tool
+
+Let's create a script-backed tool that doesn't require a database:
+
+<Steps>
+  <Step title="Create a new tool directory">
+    ```bash
+    mkdir -p app/tools/get-weather
+    ```
+  </Step>
+
+  <Step title="Create the tool config">
+    Create `app/tools/get-weather/config.terse`:
+
+    ```yaml app/tools/get-weather/config.terse
+    description: "Get current weather for a city."
+    handler: "./weather-handler.ts"
+    auth:
+      plugin: allow_all
+    ```
+  </Step>
+
+  <Step title="Create the handler script">
+    Create `app/tools/get-weather/weather-handler.ts`:
+
+    ```typescript app/tools/get-weather/weather-handler.ts
+    import dayjs from "dayjs";
+
+    type Inputs = {
+      city?: string;
+      units?: "metric" | "imperial";
+    };
+
+    export default async function handler(payload: { inputs?: Inputs }) {
+      const city = payload?.inputs?.city ?? "Bengaluru";
+      const units = payload?.inputs?.units ?? "metric";
+
+      const sampleTemp = units === "imperial" ? 77 : 25;
+      const sampleWind = units === "imperial" ? "8 mph" : "13 km/h";
+
+      return [
+        {
+          city,
+          units,
+          observed_at: dayjs().toISOString(),
+          weather: "Partly cloudy",
+          temperature: sampleTemp,
+          wind: sampleWind,
+          source: "demo-handler"
+        }
+      ];
+    }
+    ```
+  </Step>
+
+  <Step title="Test your new tool">
+    The server will automatically pick up the new tool (if running with `--watch`). List tools again:
+
+    ```bash
+    curl -X POST http://localhost:8080/mcp \
+      -H "Content-Type: application/json" \
+      -d '{
+        "jsonrpc": "2.0",
+        "method": "tools/list",
+        "id": 1
+      }'
+    ```
+
+    You should see both `hello-world` and `get-weather` in the response.
+  </Step>
+</Steps>
+
+## Build for production
+
+When you're ready to deploy:
+
+<Steps>
+  <Step title="Validate your configuration">
+    ```bash
+    hyperterse validate
+    ```
+
+    This checks all config files and TypeScript scripts for errors.
+  </Step>
+
+  <Step title="Build a deployable artifact">
+    ```bash
+    hyperterse build -o dist
+    ```
+
+    This creates a `dist/` directory with everything needed to run in production.
+  </Step>
+
+  <Step title="Serve the artifact">
+    ```bash
+    hyperterse serve dist/
+    ```
+
+    This runs the compiled artifact without needing the source files.
+  </Step>
+</Steps>
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
+Now that you have a working MCP server, explore more features:
 
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Tool configuration" icon="wrench" href="/reference/tool-config">
+    Learn about all tool configuration options
+  </Card>
+  
+  <Card title="Database adapters" icon="database" href="/concepts/adapters">
+    Connect to Postgres, MySQL, MongoDB, and Redis
+  </Card>
+  
+  <Card title="Script handlers" icon="code" href="/concepts/scripts">
+    Build custom logic with TypeScript
+  </Card>
+  
+  <Card title="Authentication" icon="shield" href="/concepts/authentication">
+    Secure your tools with auth plugins
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

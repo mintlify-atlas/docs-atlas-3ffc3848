@@ -1,0 +1,426 @@
+---
+title: Railway Deployment
+description: Deploy Hyperterse to Railway with Git-based deployments
+---
+
+Deploy Hyperterse to Railway for simple, Git-based deployments with automatic builds and zero-config infrastructure.
+
+## Prerequisites
+
+- Railway account (sign up at [railway.app](https://railway.app))
+- Git repository with your Hyperterse project
+- Railway CLI (optional, for local deployments)
+
+## Quick Deploy from GitHub
+
+<Steps>
+  <Step title="Connect your repository">
+    1. Go to [Railway Dashboard](https://railway.app/dashboard)
+    2. Click "New Project"
+    3. Select "Deploy from GitHub repo"
+    4. Choose your Hyperterse repository
+  </Step>
+  
+  <Step title="Configure build settings">
+    Railway will auto-detect your project. If needed, configure:
+    
+    - **Build Command**: Leave empty (Railway uses Dockerfile)
+    - **Start Command**: `./hyperterse serve`
+    - **Root Directory**: `/` (or your project root)
+  </Step>
+  
+  <Step title="Set environment variables">
+    In the Railway dashboard, add:
+    
+    - `PORT` = `8080` (Railway sets this automatically)
+    - `DATABASE_URL` = Your database connection string
+    - Other environment variables as needed
+  </Step>
+  
+  <Step title="Deploy">
+    Railway automatically builds and deploys on every push to your main branch.
+  </Step>
+</Steps>
+
+## Railway Configuration File
+
+Create `railway.json` in your project root for custom configuration:
+
+```json
+{
+  "$schema": "https://railway.app/railway.schema.json",
+  "build": {
+    "builder": "DOCKERFILE",
+    "dockerfilePath": "Dockerfile"
+  },
+  "deploy": {
+    "startCommand": "./hyperterse serve",
+    "restartPolicyType": "ON_FAILURE",
+    "restartPolicyMaxRetries": 10,
+    "healthcheckPath": "/heartbeat",
+    "healthcheckTimeout": 100
+  }
+}
+```
+
+## Alternative: Railway.toml
+
+Create `railway.toml`:
+
+```toml
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "./hyperterse serve"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+healthcheckPath = "/heartbeat"
+healthcheckTimeout = 100
+```
+
+## Dockerfile for Railway
+
+Create a `Dockerfile` optimized for Railway:
+
+```dockerfile
+# Build stage
+FROM golang:1.23-alpine AS builder
+
+WORKDIR /build
+
+RUN apk add --no-cache git
+
+COPY . .
+
+# Build deployment artifact
+RUN go run main.go build -o /dist
+
+# Runtime stage
+FROM alpine:latest
+
+WORKDIR /app
+
+RUN apk add --no-cache ca-certificates
+
+# Copy built artifacts
+COPY --from=builder /dist /app
+
+# Railway sets PORT automatically
+EXPOSE 8080
+
+CMD ["./hyperterse", "serve"]
+```
+
+## Environment Variables
+
+Set environment variables in Railway dashboard or using CLI:
+
+### Via Dashboard
+
+1. Go to your project
+2. Click "Variables" tab
+3. Add variables:
+   - `DATABASE_URL`
+   - `REDIS_URL`
+   - `HYPERTERSE_LOG_TAGS`
+   - `HYPERTERSE_OTEL_ENDPOINT`
+
+### Via Railway CLI
+
+Install Railway CLI:
+
+```bash
+npm i -g @railway/cli
+```
+
+Login and link project:
+
+```bash
+railway login
+railway link
+```
+
+Set variables:
+
+```bash
+railway variables set DATABASE_URL="postgres://user:pass@host:5432/db"
+railway variables set REDIS_URL="redis://host:6379"
+```
+
+## Add Railway PostgreSQL Database
+
+<Steps>
+  <Step title="Add PostgreSQL service">
+    1. In your Railway project, click "New"
+    2. Select "Database" → "PostgreSQL"
+    3. Railway provisions a database and sets `DATABASE_URL` automatically
+  </Step>
+  
+  <Step title="Connect to database">
+    Railway automatically injects `DATABASE_URL` into your service.
+    
+    Reference it in your `.hyperterse` config:
+    
+    ```yaml
+    adapters:
+      - name: main-db
+        connector: postgres
+        connection: ${DATABASE_URL}
+    ```
+  </Step>
+</Steps>
+
+## Deploy with Railway CLI
+
+Deploy from command line:
+
+```bash
+# Login
+railway login
+
+# Initialize project
+railway init
+
+# Link to existing project (optional)
+railway link
+
+# Deploy
+railway up
+
+# Open in browser
+railway open
+```
+
+## Custom Domain
+
+<Steps>
+  <Step title="Generate Railway domain">
+    Railway provides a free `.railway.app` domain automatically.
+  </Step>
+  
+  <Step title="Add custom domain">
+    1. Go to "Settings" → "Domains"
+    2. Click "Add Domain"
+    3. Enter your domain (e.g., `api.yourdomain.com`)
+    4. Add the CNAME record to your DNS provider:
+       - Name: `api`
+       - Value: `<your-project>.railway.app`
+  </Step>
+  
+  <Step title="Enable HTTPS">
+    Railway automatically provisions SSL certificates via Let's Encrypt.
+  </Step>
+</Steps>
+
+## Monitoring and Logs
+
+### View Logs
+
+In Railway dashboard:
+1. Go to your service
+2. Click "Logs" tab
+3. View real-time logs
+
+Or via CLI:
+
+```bash
+railway logs
+```
+
+### Deployment Metrics
+
+Railway provides:
+- CPU usage
+- Memory usage
+- Network traffic
+- Build times
+- Deployment history
+
+Access in "Metrics" tab.
+
+## Health Checks
+
+Railway automatically monitors your `/heartbeat` endpoint:
+
+```json
+{
+  "deploy": {
+    "healthcheckPath": "/heartbeat",
+    "healthcheckTimeout": 100
+  }
+}
+```
+
+If the health check fails, Railway will automatically restart your service.
+
+## Auto-Scaling and Replicas
+
+<Note>
+  Railway Pro plan supports horizontal scaling.
+</Note>
+
+Scale replicas in the Railway dashboard:
+1. Go to "Settings"
+2. Adjust "Replicas" slider
+3. Railway automatically load balances across replicas
+
+## CI/CD Integration
+
+Railway automatically deploys on Git push:
+
+1. Push to your main branch:
+   ```bash
+   git push origin main
+   ```
+
+2. Railway detects the push and:
+   - Builds Docker image
+   - Runs health checks
+   - Deploys with zero downtime
+
+### Branch Deployments
+
+Railway can deploy preview environments for PRs:
+
+1. Go to "Settings" → "Environments"
+2. Enable "PR Deploys"
+3. Each PR gets its own environment URL
+
+## Cost Optimization
+
+<AccordionGroup>
+  <Accordion title="Railway Pricing">
+    - **Free Trial**: $5 credit to start
+    - **Hobby Plan**: $5/month for personal projects
+    - **Pro Plan**: Usage-based pricing
+    
+    Pricing factors:
+    - Compute time (CPU/memory)
+    - Egress bandwidth
+    - Database storage
+  </Accordion>
+  
+  <Accordion title="Reduce Costs">
+    - Use sleep mode for development environments
+    - Optimize Docker image size
+    - Set resource limits in `railway.json`
+    - Use Railway's built-in databases (optimized pricing)
+  </Accordion>
+</AccordionGroup>
+
+## Resource Limits
+
+Set resource limits in `railway.json`:
+
+```json
+{
+  "deploy": {
+    "resourceLimits": {
+      "cpu": 1,
+      "memory": 512
+    }
+  }
+}
+```
+
+## Rollback Deployments
+
+1. Go to "Deployments" tab
+2. Find previous successful deployment
+3. Click "..." → "Rollback to this deployment"
+
+Or via CLI:
+
+```bash
+railway rollback
+```
+
+## Private Networking
+
+Services within the same Railway project can communicate via private networking:
+
+```yaml
+# In .hyperterse config
+adapters:
+  - name: main-db
+    connector: postgres
+    # Use Railway's internal hostname
+    connection: postgres://user:pass@postgres.railway.internal:5432/db
+```
+
+## Secrets Management
+
+Railway encrypts all environment variables at rest and in transit.
+
+<Warning>
+  Never commit secrets to Git. Always use Railway's environment variables.
+</Warning>
+
+## Example: Full Railway Setup
+
+<Steps>
+  <Step title="Create Dockerfile">
+    Use the Dockerfile shown above.
+  </Step>
+  
+  <Step title="Create railway.json">
+    ```json
+    {
+      "$schema": "https://railway.app/railway.schema.json",
+      "build": {
+        "builder": "DOCKERFILE"
+      },
+      "deploy": {
+        "startCommand": "./hyperterse serve",
+        "healthcheckPath": "/heartbeat",
+        "restartPolicyType": "ON_FAILURE"
+      }
+    }
+    ```
+  </Step>
+  
+  <Step title="Push to GitHub">
+    ```bash
+    git add .
+    git commit -m "Configure Railway deployment"
+    git push origin main
+    ```
+  </Step>
+  
+  <Step title="Deploy on Railway">
+    1. Create new project from GitHub repo
+    2. Add PostgreSQL database
+    3. Railway automatically deploys
+  </Step>
+</Steps>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Build Failures">
+    Check logs in Railway dashboard. Common issues:
+    - Missing Dockerfile
+    - Build timeouts (increase timeout in settings)
+    - Out of memory (increase memory limit)
+  </Accordion>
+  
+  <Accordion title="Health Check Failures">
+    - Verify `/heartbeat` endpoint is accessible
+    - Check if service is binding to `0.0.0.0:8080`
+    - Increase `healthcheckTimeout` in `railway.json`
+  </Accordion>
+  
+  <Accordion title="Database Connection Issues">
+    - Verify `DATABASE_URL` is set correctly
+    - Check database service is running
+    - Use Railway's private networking for internal connections
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+- Add [Redis database](https://docs.railway.app/databases/redis) for caching
+- Set up [monitoring and alerts](https://docs.railway.app/deploy/deployments#monitoring)
+- Configure [automated backups](https://docs.railway.app/databases/backups)

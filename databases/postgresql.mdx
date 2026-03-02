@@ -1,0 +1,231 @@
+---
+title: PostgreSQL Adapter
+description: Connect Hyperterse tools to PostgreSQL databases
+---
+
+The PostgreSQL adapter enables Hyperterse tools to execute SQL queries against PostgreSQL databases with automatic connection pooling and health checks.
+
+## Connection String Format
+
+PostgreSQL adapters support two connection string formats:
+
+### URL Format
+
+```
+postgresql://[user[:password]@][host][:port][/database][?option=value&...]
+postgres://[user[:password]@][host][:port][/database][?option=value&...]
+```
+
+### Key-Value Format
+
+```
+host=localhost port=5432 user=myuser password=mypass dbname=mydb sslmode=require
+```
+
+## Adapter Configuration
+
+Create a `.terse` file in your `adapters/` directory:
+
+```yaml adapters/postgres-db.terse
+connector: postgres
+connection_string: postgresql://myuser:mypass@localhost:5432/mydb
+options:
+  sslmode: require
+  connect_timeout: 10
+  pool_max_conns: 25
+```
+
+## Available Options
+
+Options are appended to the connection string as query parameters (URL format) or key-value pairs (key-value format):
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `sslmode` | string | SSL mode: `disable`, `require`, `verify-ca`, `verify-full` |
+| `connect_timeout` | number | Connection timeout in seconds (default: no timeout) |
+| `application_name` | string | Application name for PostgreSQL logs |
+| `search_path` | string | Schema search path |
+| `statement_timeout` | number | Statement execution timeout in milliseconds |
+
+See the [PostgreSQL connection string documentation](https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-CONNSTRING) for all available options.
+
+## Example Tool Using PostgreSQL
+
+```yaml tools/get-user/config.terse
+description: "Fetch user by ID from PostgreSQL"
+use: postgres-db
+statement: |
+  SELECT id, name, email, created_at 
+  FROM users 
+  WHERE id = {{ inputs.userId }}
+inputs:
+  userId:
+    type: int
+    description: "User ID to fetch"
+auth:
+  plugin: allow_all
+```
+
+## Connection Pooling
+
+The PostgreSQL adapter automatically manages connection pooling:
+
+- **Pool Creation**: A connection pool is established when the adapter is initialized
+- **Connection Reuse**: Connections are reused across multiple tool executions
+- **Health Checks**: The adapter pings the database on initialization to verify connectivity (core/runtime/connectors/postgres.go:82)
+- **Automatic Cleanup**: Connections are properly closed when the runtime shuts down
+
+The Go `database/sql` package manages the pool internally with sensible defaults.
+
+## Health Checks
+
+The PostgreSQL adapter performs health checks during initialization:
+
+```go
+// Health check on connection
+if err := db.Ping(); err != nil {
+    return nil, fmt.Errorf("failed to ping postgres database: %w", err)
+}
+```
+
+This ensures the database is reachable and credentials are valid before accepting requests.
+
+## SSL/TLS Configuration
+
+<Note>
+For production environments, always use `sslmode=require` or higher to encrypt connections.
+</Note>
+
+### SSL Modes
+
+- `disable` - No SSL (not recommended for production)
+- `require` - Require SSL, but don't verify server certificate
+- `verify-ca` - Require SSL and verify that the server certificate is issued by a trusted CA
+- `verify-full` - Require SSL, verify CA, and verify that the server hostname matches the certificate
+
+### SSL with Certificates
+
+```yaml adapters/postgres-secure.terse
+connector: postgres
+connection_string: postgresql://user:pass@db.example.com:5432/production
+options:
+  sslmode: verify-full
+  sslrootcert: /path/to/ca.crt
+  sslcert: /path/to/client.crt
+  sslkey: /path/to/client.key
+```
+
+## Authentication
+
+<Tabs>
+  <Tab title="Password Authentication">
+    ```yaml
+    connector: postgres
+    connection_string: postgresql://myuser:mypassword@localhost:5432/mydb
+    ```
+  </Tab>
+  
+  <Tab title="No Password (Trust)">
+    ```yaml
+    connector: postgres
+    connection_string: postgresql://myuser@localhost:5432/mydb
+    ```
+  </Tab>
+  
+  <Tab title="Environment Variable">
+    ```yaml
+    connector: postgres
+    connection_string: postgresql://${DB_USER}:${DB_PASS}@${DB_HOST}:5432/mydb
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+Never commit passwords directly in `.terse` files. Use environment variables or secret management systems.
+</Note>
+
+## Query Execution
+
+Queries are executed using Go's `database/sql` package with context support for proper timeout handling and cancellation:
+
+- Supports `SELECT`, `INSERT`, `UPDATE`, `DELETE`, and other SQL statements
+- Returns results as an array of maps: `[]map[string]any`
+- Binary data (`[]byte`) is automatically converted to strings for JSON serialization
+- All queries execute within the request context for automatic cancellation
+
+## Limitations
+
+<Warning>
+The `json_statements` option is **not supported** for PostgreSQL. Use standard SQL syntax.
+</Warning>
+
+PostgreSQL adapters expect SQL statements, not JSON-formatted commands. For document-based queries, use the MongoDB adapter instead.
+
+## Example: Complete Adapter Setup
+
+```yaml adapters/analytics-db.terse
+connector: postgres
+connection_string: postgresql://analytics_user:secure_pass@analytics.internal:5432/analytics
+options:
+  sslmode: verify-full
+  application_name: hyperterse-runtime
+  connect_timeout: 15
+  statement_timeout: 30000
+  pool_max_conns: 50
+```
+
+```yaml tools/get-analytics/config.terse
+description: "Fetch analytics data for a date range"
+use: analytics-db
+statement: |
+  SELECT 
+    date,
+    SUM(page_views) as total_views,
+    COUNT(DISTINCT user_id) as unique_users
+  FROM analytics
+  WHERE date BETWEEN {{ inputs.startDate }} AND {{ inputs.endDate }}
+  GROUP BY date
+  ORDER BY date DESC
+inputs:
+  startDate:
+    type: string
+    description: "Start date (YYYY-MM-DD)"
+  endDate:
+    type: string
+    description: "End date (YYYY-MM-DD)"
+auth:
+  plugin: allow_all
+```
+
+## Troubleshooting
+
+### Connection Refused
+
+Ensure PostgreSQL is running and accessible:
+
+```bash
+psql -h localhost -U myuser -d mydb
+```
+
+### SSL Required
+
+If you see "SSL required" errors, add `sslmode=require` to options:
+
+```yaml
+options:
+  sslmode: require
+```
+
+### Authentication Failed
+
+Verify credentials and check PostgreSQL's `pg_hba.conf` for access rules.
+
+### Timeout Issues
+
+Increase timeout values:
+
+```yaml
+options:
+  connect_timeout: 30
+  statement_timeout: 60000
+```

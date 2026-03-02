@@ -1,0 +1,515 @@
+---
+title: DigitalOcean Deployment
+description: Deploy Hyperterse to DigitalOcean App Platform
+---
+
+Deploy Hyperterse to DigitalOcean App Platform for managed container hosting with automatic scaling and zero-config deploys.
+
+## DigitalOcean App Platform
+
+App Platform is DigitalOcean's PaaS solution that automatically builds, deploys, and scales your applications.
+
+### Prerequisites
+
+- DigitalOcean account
+- Git repository (GitHub, GitLab, or Bitbucket)
+- Dockerfile in your project
+
+## Deploy from GitHub
+
+<Steps>
+  <Step title="Create new App">
+    1. Go to [DigitalOcean App Platform](https://cloud.digitalocean.com/apps)
+    2. Click "Create App"
+    3. Choose "GitHub" as source
+    4. Select your Hyperterse repository
+    5. Select branch (e.g., `main`)
+  </Step>
+  
+  <Step title="Configure app settings">
+    - **Name**: `hyperterse`
+    - **Type**: Web Service
+    - **Dockerfile Path**: `Dockerfile`
+    - **HTTP Port**: `8080`
+    - **Build Command**: (leave empty, uses Dockerfile)
+    - **Run Command**: `./hyperterse serve`
+  </Step>
+  
+  <Step title="Set environment variables">
+    Add environment variables:
+    - `PORT` = `8080`
+    - `DATABASE_URL` = Your database connection string
+    - `REDIS_URL` = Your Redis connection string (if needed)
+  </Step>
+  
+  <Step title="Choose instance size">
+    Select instance type:
+    - **Basic**: $5/month - 512 MB RAM, 1 vCPU
+    - **Professional**: Starting at $12/month - 1 GB RAM, 1 vCPU
+  </Step>
+  
+  <Step title="Deploy">
+    Click "Create Resources" to deploy.
+  </Step>
+</Steps>
+
+## App Spec File
+
+Create `.do/app.yaml` for declarative configuration:
+
+```yaml
+name: hyperterse
+services:
+- name: web
+  dockerfile_path: Dockerfile
+  source_dir: /
+  github:
+    repo: your-username/hyperterse
+    branch: main
+    deploy_on_push: true
+  
+  http_port: 8080
+  
+  instance_count: 2
+  instance_size_slug: basic-xs
+  
+  health_check:
+    http_path: /heartbeat
+    initial_delay_seconds: 10
+    period_seconds: 30
+    timeout_seconds: 3
+    success_threshold: 1
+    failure_threshold: 3
+  
+  envs:
+  - key: PORT
+    value: "8080"
+  - key: DATABASE_URL
+    scope: RUN_TIME
+    type: SECRET
+    value: "${db.DATABASE_URL}"
+  
+  routes:
+  - path: /
+
+databases:
+- name: db
+  engine: PG
+  version: "15"
+  production: true
+  cluster_name: hyperterse-db
+```
+
+Deploy using App Spec:
+
+```bash
+doctl apps create --spec .do/app.yaml
+```
+
+## Dockerfile for App Platform
+
+Create a `Dockerfile` in your project root:
+
+```dockerfile
+# Build stage
+FROM golang:1.23-alpine AS builder
+
+WORKDIR /build
+
+RUN apk add --no-cache git
+
+COPY . .
+
+# Build deployment artifact
+RUN go run main.go build -o /dist
+
+# Runtime stage
+FROM alpine:latest
+
+WORKDIR /app
+
+RUN apk add --no-cache ca-certificates curl
+
+# Copy built artifacts
+COPY --from=builder /dist /app
+
+# App Platform sets PORT automatically
+EXPOSE 8080
+
+CMD ["./hyperterse", "serve"]
+```
+
+## Add Managed Database
+
+<Steps>
+  <Step title="Create PostgreSQL database">
+    In App Platform settings:
+    1. Go to "Resources" tab
+    2. Click "Add Database"
+    3. Select "PostgreSQL"
+    4. Choose plan (e.g., Basic - $15/month)
+  </Step>
+  
+  <Step title="Connect database">
+    App Platform automatically:
+    - Creates database cluster
+    - Injects `${db.DATABASE_URL}` environment variable
+    - Configures private networking
+  </Step>
+  
+  <Step title="Reference in config">
+    In your `.hyperterse` file:
+    
+    ```yaml
+    adapters:
+      - name: main-db
+        connector: postgres
+        connection: ${DATABASE_URL}
+    ```
+  </Step>
+</Steps>
+
+## Deploy with doctl CLI
+
+Install DigitalOcean CLI:
+
+```bash
+# macOS
+brew install doctl
+
+# Linux
+cd ~
+wget https://github.com/digitalocean/doctl/releases/download/v1.94.0/doctl-1.94.0-linux-amd64.tar.gz
+tar xf doctl-1.94.0-linux-amd64.tar.gz
+sudo mv doctl /usr/local/bin
+```
+
+Authenticate:
+
+```bash
+doctl auth init
+```
+
+Create app:
+
+```bash
+doctl apps create --spec .do/app.yaml
+```
+
+Update app:
+
+```bash
+doctl apps update <app-id> --spec .do/app.yaml
+```
+
+List apps:
+
+```bash
+doctl apps list
+```
+
+View logs:
+
+```bash
+doctl apps logs <app-id> --type run --follow
+```
+
+## Environment Variables
+
+Set environment variables via App Platform console or CLI:
+
+### Via Console
+
+1. Go to your app
+2. Click "Settings" → "App-Level Environment Variables"
+3. Add variables
+
+### Via doctl
+
+```bash
+doctl apps update <app-id> --env PORT=8080 --env DATABASE_URL=secret:db_url
+```
+
+### Encrypted Secrets
+
+Store sensitive values as encrypted secrets:
+
+1. Go to "Settings" → "App-Level Environment Variables"
+2. Toggle "Encrypt" for sensitive variables
+3. Values are encrypted at rest and in transit
+
+## Auto-Scaling
+
+Configure auto-scaling in `.do/app.yaml`:
+
+```yaml
+services:
+- name: web
+  instance_count: 2
+  autoscaling:
+    min_instance_count: 2
+    max_instance_count: 10
+    metrics:
+      cpu:
+        percent: 70
+```
+
+App Platform automatically scales based on CPU usage.
+
+## Custom Domain
+
+<Steps>
+  <Step title="Add domain">
+    1. Go to "Settings" → "Domains"
+    2. Click "Add Domain"
+    3. Enter your domain (e.g., `api.yourdomain.com`)
+  </Step>
+  
+  <Step title="Configure DNS">
+    Add DNS records to your domain provider:
+    
+    **For root domain:**
+    - Type: `A`
+    - Host: `@`
+    - Value: `<app-platform-ip>`
+    
+    **For subdomain:**
+    - Type: `CNAME`
+    - Host: `api`
+    - Value: `<app-name>.ondigitalocean.app`
+  </Step>
+  
+  <Step title="Enable HTTPS">
+    App Platform automatically provisions SSL certificates via Let's Encrypt.
+  </Step>
+</Steps>
+
+## Health Checks
+
+Configure health checks in `.do/app.yaml`:
+
+```yaml
+services:
+- name: web
+  health_check:
+    http_path: /heartbeat
+    initial_delay_seconds: 10
+    period_seconds: 30
+    timeout_seconds: 3
+    success_threshold: 1
+    failure_threshold: 3
+```
+
+If health checks fail, App Platform automatically restarts the container.
+
+## Monitoring and Alerts
+
+### View Metrics
+
+1. Go to your app in App Platform
+2. Click "Insights" tab
+3. View:
+   - CPU usage
+   - Memory usage
+   - Request rate
+   - Response time
+   - Error rate
+
+### Set Up Alerts
+
+1. Go to "Settings" → "Alerts"
+2. Configure alerts for:
+   - High CPU usage
+   - High memory usage
+   - Failed deployments
+   - Health check failures
+
+### View Logs
+
+In App Platform console:
+1. Go to "Runtime Logs" tab
+2. Filter by:
+   - Build logs
+   - Run logs
+   - System logs
+
+Or via CLI:
+
+```bash
+# View runtime logs
+doctl apps logs <app-id> --type run --follow
+
+# View build logs
+doctl apps logs <app-id> --type build
+```
+
+## CI/CD Integration
+
+App Platform automatically deploys on Git push:
+
+1. Push to your repository:
+   ```bash
+   git push origin main
+   ```
+
+2. App Platform:
+   - Detects the push
+   - Builds Docker image
+   - Runs health checks
+   - Deploys with zero downtime
+
+### Manual Deploys
+
+Trigger manual deploy:
+
+```bash
+doctl apps create-deployment <app-id>
+```
+
+## Rollback Deployments
+
+1. Go to "Deployments" tab
+2. Find previous successful deployment
+3. Click "Rollback"
+
+Or via CLI:
+
+```bash
+doctl apps list-deployments <app-id>
+doctl apps create-deployment <app-id> --deployment-id <previous-deployment-id>
+```
+
+## Private Networking
+
+App Platform components communicate via trusted sources:
+
+```yaml
+# Database is accessible via ${db.DATABASE_URL}
+# Redis is accessible via ${redis.REDIS_URL}
+# All connections use TLS
+```
+
+## Cost Optimization
+
+<AccordionGroup>
+  <Accordion title="App Platform Pricing">
+    **Basic Tier:**
+    - $5/month - 512 MB RAM, 1 vCPU
+    - Suitable for development and light production
+    
+    **Professional Tier:**
+    - Starting at $12/month - 1 GB RAM, 1 vCPU
+    - Auto-scaling, custom build resources
+    - Better for production workloads
+  </Accordion>
+  
+  <Accordion title="Database Pricing">
+    - **Basic**: $15/month - 1 GB RAM, 10 GB storage
+    - **Professional**: Starting at $60/month - 4 GB RAM, 80 GB storage
+  </Accordion>
+  
+  <Accordion title="Reduce Costs">
+    - Use smallest instance size that meets requirements
+    - Set reasonable `max_instance_count` for autoscaling
+    - Use shared databases for development
+    - Leverage DigitalOcean's built-in caching
+  </Accordion>
+</AccordionGroup>
+
+## Backup and Recovery
+
+Managed databases include automatic backups:
+
+- **Daily backups** retained for 7 days
+- **Point-in-time recovery** available
+- **Manual backups** on-demand
+
+Restore from backup:
+
+1. Go to Databases → Your Database
+2. Click "Backups" tab
+3. Select backup and click "Restore"
+
+## Example: Full App Platform Setup
+
+<Steps>
+  <Step title="Create .do/app.yaml">
+    ```yaml
+    name: hyperterse
+    services:
+    - name: web
+      dockerfile_path: Dockerfile
+      github:
+        repo: username/hyperterse
+        branch: main
+        deploy_on_push: true
+      http_port: 8080
+      instance_count: 2
+      instance_size_slug: basic-xs
+      health_check:
+        http_path: /heartbeat
+      envs:
+      - key: DATABASE_URL
+        value: "${db.DATABASE_URL}"
+    
+    databases:
+    - name: db
+      engine: PG
+      version: "15"
+    ```
+  </Step>
+  
+  <Step title="Create Dockerfile">
+    Use the Dockerfile example above.
+  </Step>
+  
+  <Step title="Deploy">
+    ```bash
+    doctl apps create --spec .do/app.yaml
+    ```
+  </Step>
+  
+  <Step title="Monitor deployment">
+    ```bash
+    doctl apps list
+    doctl apps logs <app-id> --type run --follow
+    ```
+  </Step>
+</Steps>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Build Failures">
+    Check build logs:
+    ```bash
+    doctl apps logs <app-id> --type build
+    ```
+    
+    Common issues:
+    - Missing or invalid Dockerfile
+    - Build timeout (increase in settings)
+    - Out of memory during build
+  </Accordion>
+  
+  <Accordion title="Health Check Failures">
+    - Verify `/heartbeat` endpoint returns 200
+    - Check app is binding to `0.0.0.0:8080`
+    - Increase `initial_delay_seconds` if app takes time to start
+    - Review runtime logs for errors
+  </Accordion>
+  
+  <Accordion title="Database Connection Issues">
+    - Verify `DATABASE_URL` is correctly referenced
+    - Check database is running and accessible
+    - Ensure connection string format matches your adapter
+    - Use App Platform's private networking
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+- Add [Redis for caching](https://docs.digitalocean.com/products/databases/redis/)
+- Set up [CDN with Spaces](https://docs.digitalocean.com/products/spaces/)
+- Configure [monitoring and alerts](https://docs.digitalocean.com/products/monitoring/)
+- Review [App Platform best practices](https://docs.digitalocean.com/products/app-platform/)

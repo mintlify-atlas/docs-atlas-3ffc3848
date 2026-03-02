@@ -1,0 +1,370 @@
+---
+title: 'Input Validation & SQL Injection Prevention'
+description: 'Learn how to safely handle user inputs and prevent SQL injection attacks in Hyperterse'
+---
+
+## Overview
+
+Hyperterse provides a multi-layered approach to input safety through type validation and placeholder substitution. Understanding how these systems work together is critical for building secure tools.
+
+## Placeholder Substitution System
+
+Hyperterse uses a template-based placeholder system for injecting user inputs into statements:
+
+```yaml
+statement: |
+  SELECT id, name, email
+  FROM users
+  WHERE id = {{ inputs.user_id }}
+```
+
+The `{{ inputs.x }}` syntax is replaced with actual values at runtime.
+
+### How Substitution Works
+
+Placeholder substitution is implemented in `core/runtime/executor/utils/substitutor.go:17-57`. The substitution process:
+
+1. Extracts all `{{ inputs.fieldName }}` patterns using regex
+2. Looks up each field in the validated inputs map
+3. Converts the value to a string representation
+4. **Performs raw string replacement** with no escaping or quoting
+
+<Warning>
+  **Critical Security Note**: Placeholder substitution is **raw string replacement**. Hyperterse does not automatically add quotes, escape special characters, or use parameterized queries. The framework relies entirely on type validation to prevent injection attacks.
+</Warning>
+
+### Raw Replacement Example
+
+Given this input:
+```json
+{
+  "user_id": 123
+}
+```
+
+The statement:
+```sql
+SELECT * FROM users WHERE id = {{ inputs.user_id }}
+```
+
+Becomes:
+```sql
+SELECT * FROM users WHERE id = 123
+```
+
+The number `123` is inserted **as-is** without quotes or escaping.
+
+## Type Validation System
+
+Type validation is your primary defense against injection attacks. The validator is implemented in `core/parser/validator.go`.
+
+### Supported Types
+
+Hyperterse supports these primitive types (defined in `proto/primitives/primitives.proto:8-15`):
+
+- `string` - Text values
+- `int` - Integer numbers
+- `float` - Floating-point numbers
+- `boolean` - True/false values
+- `datetime` - ISO 8601 datetime strings
+
+### Type Enforcement
+
+Every input **must** declare a type:
+
+```yaml
+inputs:
+  user_id:
+    type: int
+    description: "User ID to fetch"
+  email:
+    type: string
+    description: "User email address"
+  is_active:
+    type: boolean
+    description: "Filter by active status"
+```
+
+Validation rules (`core/parser/validator.go:189-224`):
+
+1. Input name must start with a letter and contain only letters, numbers, hyphens, and underscores
+2. Type is required and must be a valid primitive
+3. Optional inputs must have a default value
+4. All inputs referenced in `{{ inputs.x }}` must be defined
+
+### Input Name Validation
+
+Input names are validated with this pattern:
+```go
+namePattern := regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]*$`)
+```
+
+This prevents injection through malformed input names.
+
+## Custom Input Validation
+
+For advanced validation beyond type checking, use input mapper scripts:
+
+```yaml
+description: "Get user by id"
+use: my-adapter
+statement: |
+  SELECT * FROM users WHERE id = {{ inputs.userId }}
+inputs:
+  userId:
+    type: int
+mappers:
+  input: "./user-input-validator.ts"
+```
+
+Example validator (`demo/app/tools/get-user/user-input-validator.ts:1-20`):
+
+```typescript
+export default async function inputTransform(payload: { inputs?: Record<string, unknown> }) {
+  const inputs = payload?.inputs ?? {};
+  const rawUserId = inputs.userId;
+
+  if (rawUserId === undefined || rawUserId === null) {
+    throw new Error("user_id is required");
+  }
+
+  const userId = Number(rawUserId);
+  if (!Number.isFinite(userId) || userId <= 0 || !Number.isInteger(userId)) {
+    throw new Error("user_id must be a positive integer");
+  }
+
+  return {
+    ...inputs,
+    userId,
+  };
+}
+```
+
+Input mappers run **before** placeholder substitution, allowing you to:
+
+- Enforce business logic constraints (e.g., positive integers only)
+- Sanitize string inputs
+- Transform or normalize values
+- Reject malicious patterns
+
+## SQL Injection Prevention
+
+### The Threat
+
+Without proper validation, an attacker could inject SQL:
+
+```yaml
+# UNSAFE if email is not validated
+statement: |
+  SELECT * FROM users WHERE email = '{{ inputs.email }}'
+```
+
+If `email` receives: `' OR '1'='1`
+
+The query becomes:
+```sql
+SELECT * FROM users WHERE email = '' OR '1'='1'
+```
+
+This returns all users instead of one.
+
+### Mitigation Strategy
+
+<Warning>
+  **Never use string type for user inputs in SQL WHERE clauses without additional validation**. Always prefer numeric types (int, float) when possible, or use input mappers to sanitize strings.
+</Warning>
+
+#### Safe Pattern 1: Use Numeric Types
+
+```yaml
+# SAFE - integers cannot contain SQL syntax
+statement: |
+  SELECT * FROM users WHERE id = {{ inputs.user_id }}
+inputs:
+  user_id:
+    type: int
+```
+
+#### Safe Pattern 2: Validate Strings with Input Mapper
+
+```yaml
+statement: |
+  SELECT * FROM users WHERE email = '{{ inputs.email }}'
+inputs:
+  email:
+    type: string
+mappers:
+  input: "./email-validator.ts"
+```
+
+```typescript
+// email-validator.ts
+export default async function inputTransform(payload: { inputs?: Record<string, unknown> }) {
+  const email = String(payload.inputs?.email || "");
+  
+  // Strict email validation
+  const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+  if (!emailRegex.test(email)) {
+    throw new Error("Invalid email format");
+  }
+  
+  // Reject SQL syntax characters
+  if (email.includes("'") || email.includes("\"") || email.includes(";")) {
+    throw new Error("Email contains invalid characters");
+  }
+  
+  return { ...payload.inputs, email };
+}
+```
+
+#### Safe Pattern 3: Use LIKE Safely
+
+```yaml
+# SAFE - controlled pattern with validated input
+statement: |
+  SELECT * FROM products 
+  WHERE category = '{{ inputs.category }}'
+  AND name LIKE '%{{ inputs.search }}%'
+inputs:
+  category:
+    type: string
+  search:
+    type: string
+mappers:
+  input: "./search-validator.ts"
+```
+
+```typescript
+// search-validator.ts
+export default async function inputTransform(payload: { inputs?: Record<string, unknown> }) {
+  const category = String(payload.inputs?.category || "");
+  const search = String(payload.inputs?.search || "");
+  
+  // Whitelist allowed categories
+  const allowedCategories = ["electronics", "books", "clothing"];
+  if (!allowedCategories.includes(category)) {
+    throw new Error("Invalid category");
+  }
+  
+  // Sanitize search term - remove SQL wildcards and quotes
+  const sanitized = search
+    .replace(/['"`;\\]/g, "")  // Remove SQL syntax
+    .replace(/[%_]/g, "")        // Remove SQL wildcards
+    .slice(0, 50);               // Limit length
+  
+  return { category, search: sanitized };
+}
+```
+
+## Best Practices
+
+### 1. Prefer Numeric Types
+
+Whenever possible, use `int` or `float` types instead of strings:
+
+```yaml
+# Good
+inputs:
+  user_id: { type: int }
+  amount: { type: float }
+  is_active: { type: boolean }
+```
+
+### 2. Always Validate Strings
+
+If you must use string inputs in SQL, always use an input mapper:
+
+```yaml
+# Required for safety
+inputs:
+  email: { type: string }
+mappers:
+  input: "./validate-email.ts"
+```
+
+### 3. Use Whitelists, Not Blacklists
+
+For enum-like values, validate against a whitelist:
+
+```typescript
+const allowedStatuses = ["active", "inactive", "pending"];
+if (!allowedStatuses.includes(status)) {
+  throw new Error("Invalid status");
+}
+```
+
+### 4. Limit String Length
+
+Always cap string input length to prevent buffer exploits:
+
+```typescript
+const name = String(inputs.name || "").slice(0, 100);
+```
+
+### 5. Escape Special Characters
+
+For string inputs used in SQL, escape quotes and backslashes:
+
+```typescript
+function escapeSql(str: string): string {
+  return str.replace(/['\\]/g, '\\$&');
+}
+```
+
+### 6. Use Statement Validation
+
+The validator ensures all placeholders match defined inputs (`core/parser/validator.go:227-242`):
+
+```go
+referencedInputs := extractInputReferences(tool.Statement)
+for _, refInput := range referencedInputs {
+  if !inputNames[refInput] {
+    errors = append(errors, fmt.Sprintf(
+      "%s.statement references '{{ inputs.%s }}' but input not defined",
+      prefix, refInput
+    ))
+  }
+}
+```
+
+This prevents typos that could lead to undefined behavior.
+
+## Testing Input Safety
+
+Always test your tools with malicious inputs:
+
+```bash
+# Test SQL injection
+curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "method": "tools/call",
+    "params": {
+      "name": "get-user",
+      "arguments": {
+        "email": "\' OR \'1\'=\'1"
+      }
+    },
+    "id": 1
+  }'
+```
+
+Expected result: Input mapper should reject the malicious input before execution.
+
+## Summary
+
+<Check>
+  **Secure Input Handling Checklist**:
+  - Use numeric types (int, float, boolean) whenever possible
+  - Add input mappers for all string inputs used in SQL
+  - Validate strings against whitelists, not blacklists  
+  - Escape quotes and special characters in SQL strings
+  - Limit string input length
+  - Test with malicious inputs during development
+  - Never trust user input - always validate
+</Check>
+
+<Warning>
+  Remember: Placeholder substitution is **raw string replacement**. Type validation and input mappers are your only defense against injection attacks. Design your tools accordingly.
+</Warning>

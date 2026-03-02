@@ -1,0 +1,271 @@
+---
+title: Adapter Configuration
+description: Complete reference for adapter .terse configuration files
+---
+
+Adapter `.terse` files configure database connections and connector settings. Each adapter file defines a single database adapter that can be used by tools.
+
+## Schema Location
+
+The JSON schema is available at:
+```
+https://raw.githubusercontent.com/hyperterse/hyperterse/refs/heads/main/schema/adapter.terse.schema.json
+```
+
+## File Location
+
+Adapter files are located in the adapters directory (default: `app/adapters/`) and must have a `.terse` extension:
+
+```
+project/
+├── .hyperterse
+└── app/
+    └── adapters/
+        ├── my-adapter.terse
+        └── my-other-adapter.terse
+```
+
+## Configuration Examples
+
+### PostgreSQL Adapter
+
+```yaml
+connector: postgres
+connection_string: postgresql://demo:demo@localhost:5432/demo
+options:
+  sslmode: disable
+```
+
+### Redis Adapter
+
+```yaml
+connector: redis
+connection_string: "redis://localhost:6379/0"
+```
+
+### MySQL Adapter
+
+```yaml
+connector: mysql
+connection_string: "mysql://user:password@localhost:3306/database"
+options:
+  charset: utf8mb4
+  parseTime: "true"
+```
+
+### MongoDB Adapter
+
+```yaml
+connector: mongodb
+connection_string: "mongodb://localhost:27017/mydb"
+options:
+  maxPoolSize: "100"
+  retryWrites: "true"
+```
+
+## Configuration Fields
+
+<ParamField path="connector" type="string" required>
+  Connector type specifying which database driver to use.
+  
+  **Allowed values:**
+  - `postgres` - PostgreSQL database
+  - `redis` - Redis key-value store
+  - `mysql` - MySQL database
+  - `mongodb` - MongoDB document database
+  
+  ```yaml
+  connector: postgres
+  ```
+</ParamField>
+
+<ParamField path="connection_string" type="string" required>
+  Connection string for the database. Format varies by connector type.
+  
+  **PostgreSQL:**
+  ```yaml
+  connection_string: postgresql://user:password@host:port/database
+  ```
+  
+  **Redis:**
+  ```yaml
+  connection_string: redis://host:port/db
+  ```
+  
+  **MySQL:**
+  ```yaml
+  connection_string: mysql://user:password@host:port/database
+  ```
+  
+  **MongoDB:**
+  ```yaml
+  connection_string: mongodb://host:port/database
+  ```
+  
+  <Note>
+    Connection strings may contain sensitive credentials. Consider using environment variables:
+    ```yaml
+    connection_string: "{{ env.DATABASE_URL }}"
+    ```
+  </Note>
+</ParamField>
+
+<ParamField path="name" type="string">
+  Optional adapter name override. When omitted, the adapter name defaults to the filename (without `.terse` extension).
+  
+  **Pattern:** `^[a-zA-Z][a-zA-Z0-9_-]*$`
+  
+  Must start with a letter and contain only letters, numbers, hyphens, and underscores.
+  
+  ```yaml
+  name: my-custom-adapter-name
+  connector: postgres
+  connection_string: postgresql://localhost/db
+  ```
+  
+  <Note>
+    If the file is named `my-adapter.terse`, the adapter name will be `my-adapter` by default.
+  </Note>
+</ParamField>
+
+<ParamField path="options" type="object">
+  Connector-specific options passed to the database driver. Options are key-value pairs where values can be strings, booleans, or numbers.
+  
+  **Type:** `Record<string, string | boolean | number>`
+  
+  <Expandable title="PostgreSQL Options">
+    Common PostgreSQL options:
+    - `sslmode` - SSL mode (`disable`, `require`, `verify-ca`, `verify-full`)
+    - `connect_timeout` - Connection timeout in seconds
+    - `application_name` - Application name for connection tracking
+    
+    ```yaml
+    options:
+      sslmode: require
+      connect_timeout: "30"
+      application_name: hyperterse
+    ```
+  </Expandable>
+  
+  <Expandable title="Redis Options">
+    Common Redis options:
+    - `maxRetries` - Maximum number of retries
+    - `dialTimeout` - Dial timeout
+    - `readTimeout` - Read timeout
+    
+    ```yaml
+    options:
+      maxRetries: "3"
+      dialTimeout: "5s"
+      readTimeout: "3s"
+    ```
+  </Expandable>
+  
+  <Expandable title="MySQL Options">
+    Common MySQL options:
+    - `charset` - Character set
+    - `parseTime` - Parse time values to Go time.Time
+    - `loc` - Location for time.Time values
+    
+    ```yaml
+    options:
+      charset: utf8mb4
+      parseTime: "true"
+      loc: UTC
+    ```
+  </Expandable>
+  
+  <Expandable title="MongoDB Options">
+    Common MongoDB options:
+    - `maxPoolSize` - Maximum connection pool size
+    - `retryWrites` - Enable retry writes
+    - `w` - Write concern
+    
+    ```yaml
+    options:
+      maxPoolSize: "100"
+      retryWrites: "true"
+      w: "1"
+    ```
+  </Expandable>
+</ParamField>
+
+## Adapter Naming
+
+Adapter names are determined in the following order:
+
+1. **Explicit `name` field** - If specified in the configuration
+2. **Filename** - The `.terse` filename without extension
+
+### Examples
+
+**File:** `app/adapters/users-db.terse`
+```yaml
+connector: postgres
+connection_string: postgresql://localhost/users
+```
+**Adapter name:** `users-db`
+
+---
+
+**File:** `app/adapters/cache.terse`
+```yaml
+name: redis-cache
+connector: redis
+connection_string: redis://localhost:6379/0
+```
+**Adapter name:** `redis-cache`
+
+## Environment Variables
+
+Use environment variable substitution to avoid hardcoding credentials:
+
+```yaml
+connector: postgres
+connection_string: "{{ env.DATABASE_URL }}"
+options:
+  sslmode: "{{ env.DB_SSL_MODE }}"
+```
+
+Set the environment variables:
+```bash
+export DATABASE_URL="postgresql://user:pass@localhost/db"
+export DB_SSL_MODE="require"
+```
+
+## IDE Integration
+
+Enable schema validation in your editor:
+
+```yaml
+# yaml-language-server: $schema=https://raw.githubusercontent.com/hyperterse/hyperterse/refs/heads/main/schema/adapter.terse.schema.json
+
+connector: postgres
+connection_string: postgresql://localhost/db
+```
+
+## Using Adapters in Tools
+
+Once defined, adapters are referenced by tools using the `use` field:
+
+```yaml
+# app/tools/get-user/config.terse
+use: users-db
+statement: SELECT * FROM users WHERE id = {{ inputs.userId }}
+```
+
+See [Tool Configuration](/reference/tool-config) for more details.
+
+## Validation
+
+Adapter configurations are validated at startup:
+- `connector` must be one of: `postgres`, `redis`, `mysql`, `mongodb`
+- `connection_string` is required and must be non-empty
+- `name` pattern must match `^[a-zA-Z][a-zA-Z0-9_-]*$` if specified
+- `options` values must be strings, booleans, or numbers
+
+## Related
+
+- [Root Configuration](/reference/root-config) - Configure adapter discovery directory
+- [Tool Configuration](/reference/tool-config) - Use adapters in tools
+- [Environment Variables](/reference/environment-variables) - Secure credential management
