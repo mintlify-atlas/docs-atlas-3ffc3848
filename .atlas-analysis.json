@@ -1,0 +1,121 @@
+{
+  "projectType": "framework",
+  "projectName": "Hyperterse",
+  "projectDescription": "The declarative MCP framework for building performant tool servers with database adapters and embedded scripting",
+  "theme": "mint",
+  "primaryColor": "#0D4A36",
+  "lightColor": "#86efac",
+  "darkColor": "#0D4A36",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": ["introduction", "installation", "quickstart"]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/project-structure",
+              "concepts/adapters",
+              "concepts/tools",
+              "concepts/scripts",
+              "concepts/authentication"
+            ]
+          },
+          {
+            "group": "Runtime",
+            "pages": [
+              "runtime/mcp-transport",
+              "runtime/execution-pipeline",
+              "runtime/caching",
+              "runtime/observability"
+            ]
+          },
+          {
+            "group": "Database Adapters",
+            "pages": [
+              "databases/postgresql",
+              "databases/mysql",
+              "databases/mongodb",
+              "databases/redis"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/overview",
+              "deployment/docker",
+              "deployment/kubernetes",
+              "deployment/bare-metal",
+              "deployment/aws",
+              "deployment/gcp",
+              "deployment/azure",
+              "deployment/railway",
+              "deployment/digital-ocean",
+              "deployment/cloudflare",
+              "deployment/vercel"
+            ]
+          },
+          {
+            "group": "Security",
+            "pages": [
+              "security/input-safety",
+              "security/production-hardening"
+            ]
+          },
+          {
+            "group": "Migration",
+            "pages": ["migration/v1-to-v2"]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "CLI Commands",
+            "pages": ["reference/cli"]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "reference/root-config",
+              "reference/adapter-config",
+              "reference/tool-config",
+              "reference/environment-variables",
+              "reference/configuration-schemas"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Filesystem-based tool discovery",
+    "Declarative .terse configuration files",
+    "Pluggable database adapters (Postgres, MySQL, MongoDB, Redis)",
+    "Embedded TypeScript scripting with sandboxed runtime",
+    "Per-tool authentication with plugins",
+    "MCP server over Streamable HTTP",
+    "Build/compile/serve pipeline",
+    "Hot reload with --watch flag",
+    "OpenTelemetry observability",
+    "In-memory caching with per-tool TTL"
+  ],
+  "publicApiSurface": [
+    "hyperterse init - Scaffold new project",
+    "hyperterse start - Run development server",
+    "hyperterse start --watch - Run with hot reload",
+    "hyperterse build - Compile to deployable artifact",
+    "hyperterse serve - Run from compiled artifact",
+    "hyperterse validate - Validate configuration",
+    "hyperterse upgrade - Upgrade CLI version",
+    "POST /mcp - MCP Streamable HTTP endpoint",
+    "GET /heartbeat - Health check endpoint",
+    "tools/list - List available MCP tools",
+    "tools/call - Invoke MCP tool"
+  ]
+}
